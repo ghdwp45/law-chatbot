@@ -82,7 +82,9 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: newMessages }),
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data;
+      try { data = JSON.parse(rawText); } catch { throw new Error('서버 오류: ' + rawText.slice(0, 200)); }
       if (!res.ok) throw new Error(data.error || "오류 발생");
 
       const { explainText, panels } = parseResponse(data.text);
