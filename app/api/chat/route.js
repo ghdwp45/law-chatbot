@@ -29,7 +29,7 @@ export async function POST(req) {
         mcp_servers: [
           {
             type: "url",
-            url: "https://korean-law-mcp.fly.dev/mcp",
+            url: "https://korean-law-mcp.fly.dev/mcp?oc=hongjeyeon",
             name: "korean-law",
           },
         ],
