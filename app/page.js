@@ -59,6 +59,8 @@ export default function Home() {
       .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
       .replace(/(제\d+조(?:의\d+)?(?:\s*제\d+항)?(?:\s*제\d+호)?)/g,
         `<span class="law-ref" onclick="window._clickArticle('$1')">$1</span>`)
+      .replace(/\[([^\]]+?)(제\d+조(?:의\d+)?)\]/g,
+        `<span class="law-tag" onclick="window._clickArticle('$2')">$1 $2</span>`)
       .replace(/\n/g, "<br/>");
   };
 
@@ -289,6 +291,20 @@ export default function Home() {
         @keyframes highlight-pulse { 0%,100%{box-shadow:0 0 0 3px rgba(192,57,43,0.3)} 50%{box-shadow:0 0 0 6px rgba(192,57,43,0.1)} }
         .law-ref { color:#c0392b; font-weight:700; cursor:pointer; border-bottom:1.5px dashed #c0392b; padding:0 2px; }
         .law-ref:hover { background:#fde8e8; border-radius:3px; }
+        .law-tag {
+          display: inline-block;
+          background: #1a1208;
+          color: #f5f0e8;
+          font-size: 10px;
+          font-weight: 600;
+          padding: 2px 7px;
+          border-radius: 10px;
+          margin-left: 4px;
+          cursor: pointer;
+          vertical-align: middle;
+          transition: background 0.15s;
+        }
+        .law-tag:hover { background: #c0392b; }
       `}</style>
     </div>
   );
