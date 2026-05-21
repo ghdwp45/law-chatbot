@@ -35,11 +35,7 @@ export default function Home() {
       lines.forEach(line => {
         const parts = line.split("|");
         if (parts.length >= 2) {
-          links.push({
-            lawName: parts[0].trim(),
-            articleNo: parts[1].trim(),
-            desc: parts[2]?.trim() || "",
-          });
+          links.push({ lawName: parts[0].trim(), articleNo: parts[1].trim(), desc: parts[2]?.trim() || "" });
         }
       });
     }
@@ -48,12 +44,15 @@ export default function Home() {
 
   const handleArticleClick = (articleNo) => {
     setActiveArticle(articleNo);
-    // 해당 조문 카드로 스크롤
     const key = articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
     if (key && linkRefs.current[key]) {
       linkRefs.current[key].scrollIntoView({ behavior: "smooth", block: "center" });
     }
   };
+
+  useEffect(() => {
+    window._clickArticle = handleArticleClick;
+  }, [lawLinks]);
 
   const formatExplain = (text) => {
     return text
@@ -62,10 +61,6 @@ export default function Home() {
         `<span class="law-ref" onclick="window._clickArticle('$1')">$1</span>`)
       .replace(/\n/g, "<br/>");
   };
-
-  useEffect(() => {
-    window._clickArticle = handleArticleClick;
-  }, [lawLinks]);
 
   const send = async (text) => {
     const userText = text || input.trim();
@@ -90,19 +85,17 @@ export default function Home() {
         throw new Error(err.error || "오류 발생");
       }
 
-      // 스트리밍 수신
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let fullText = "";
-      let streamMsg = { role: "assistant", content: "" };
-      setMessages(prev => [...prev, streamMsg]);
+
+      setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("
-").filter(l => l.startsWith("data: "));
+        const lines = chunk.split("\n").filter(l => l.startsWith("data: "));
         for (const line of lines) {
           try {
             const parsed = JSON.parse(line.slice(6));
@@ -127,9 +120,16 @@ export default function Home() {
           } catch {}
         }
       }
-
     } catch (e) {
-      setMessages(prev => [...prev.slice(0, -1), { role: "assistant", content: `❌ ${e.message}` }]);
+      setMessages(prev => {
+        const updated = [...prev];
+        if (updated[updated.length - 1]?.role === "assistant") {
+          updated[updated.length - 1] = { role: "assistant", content: `❌ ${e.message}` };
+        } else {
+          updated.push({ role: "assistant", content: `❌ ${e.message}` });
+        }
+        return updated;
+      });
     } finally {
       setLoading(false);
     }
@@ -173,7 +173,6 @@ export default function Home() {
       </header>
 
       <div style={s.body}>
-        {/* 왼쪽: 채팅 */}
         <div style={s.leftPane}>
           <div style={s.chatArea} ref={chatRef}>
             {messages.length === 0 && (
@@ -203,7 +202,7 @@ export default function Home() {
               </div>
             ))}
 
-            {loading && (
+            {loading && messages[messages.length-1]?.content === "" && (
               <div style={{...s.msgRow, justifyContent: "flex-start"}}>
                 <div style={s.avatarAi}>법</div>
                 <div style={s.typing}>
@@ -230,14 +229,11 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 오른쪽: 관련 법령 링크 */}
         <div style={s.rightPane}>
           <div style={s.rightHeader}>
             <span style={s.rightHeaderIcon}>📜</span>
             <span style={s.rightHeaderTitle}>관련 법령</span>
-            {lawLinks.length > 0 && (
-              <span style={s.rightHeaderBadge}>{lawLinks.length}개</span>
-            )}
+            {lawLinks.length > 0 && <span style={s.rightHeaderBadge}>{lawLinks.length}개</span>}
           </div>
 
           <div style={s.lawContent}>
@@ -249,18 +245,12 @@ export default function Home() {
               </div>
             ) : (
               <div>
-                <div style={s.lawNote}>
-                  💡 왼쪽 답변의 <strong>조문번호</strong>를 클릭하면 해당 법령이 하이라이트됩니다
-                </div>
+                <div style={s.lawNote}>💡 왼쪽 답변의 <strong>조문번호</strong>를 클릭하면 해당 법령이 하이라이트됩니다</div>
                 {lawLinks.map((link, i) => {
                   const key = link.articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
-                  const isActive = activeArticle && (
-                    link.articleNo.includes(activeArticle.match(/제\d+조(?:의\d+)?/)?.[0] || activeArticle)
-                    || link.lawName.includes(activeArticle)
-                  );
+                  const isActive = activeArticle && link.articleNo.includes(activeArticle.match(/제\d+조(?:의\d+)?/)?.[0] || activeArticle);
                   return (
-                    <a
-                      key={i}
+                    <a key={i}
                       ref={el => { if (key) linkRefs.current[key] = el; }}
                       href={getLawSearchUrl(link.lawName)}
                       target="_blank"
@@ -277,7 +267,6 @@ export default function Home() {
                     </a>
                   );
                 })}
-
                 <div style={s.lawDirectSearch}>
                   <div style={s.lawDirectTitle}>📌 직접 검색</div>
                   <a href="https://www.law.go.kr" target="_blank" rel="noopener noreferrer" style={s.lawDirectLink}>
@@ -298,75 +287,68 @@ export default function Home() {
         ::-webkit-scrollbar-thumb { background: #d4c9b0; border-radius: 2px; }
         @keyframes blink { 0%,60%,100%{transform:translateY(0);opacity:.4} 30%{transform:translateY(-5px);opacity:1} }
         @keyframes highlight-pulse { 0%,100%{box-shadow:0 0 0 3px rgba(192,57,43,0.3)} 50%{box-shadow:0 0 0 6px rgba(192,57,43,0.1)} }
-        .law-ref {
-          color: #c0392b;
-          font-weight: 700;
-          cursor: pointer;
-          border-bottom: 1.5px dashed #c0392b;
-          padding: 0 2px;
-          transition: background 0.15s;
-        }
-        .law-ref:hover { background: #fde8e8; border-radius: 3px; }
+        .law-ref { color:#c0392b; font-weight:700; cursor:pointer; border-bottom:1.5px dashed #c0392b; padding:0 2px; }
+        .law-ref:hover { background:#fde8e8; border-radius:3px; }
       `}</style>
     </div>
   );
 }
 
 const s = {
-  root: { display:"flex", flexDirection:"column", height:"100vh", background:"#f5f0e8", fontFamily:"'Noto Sans KR',sans-serif" },
-  header: { background:"#1a1208", color:"#f5f0e8", padding:"0 24px", height:52, display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0, borderBottom:"3px solid #b8922a" },
-  headerLeft: { display:"flex", alignItems:"center", gap:12 },
-  headerRight: { display:"flex", alignItems:"center", gap:14 },
-  seal: { width:34,height:34,background:"#c0392b",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Serif KR',serif",fontSize:14,fontWeight:700,color:"white" },
-  headerTitle: { fontFamily:"'Noto Serif KR',serif",fontSize:15,fontWeight:700,letterSpacing:1 },
-  headerSub: { fontSize:11,color:"#aaa",fontWeight:300 },
-  resetBtn: { background:"transparent",border:"1px solid #555",color:"#ccc",padding:"5px 10px",borderRadius:6,fontSize:11,cursor:"pointer",fontFamily:"'Noto Sans KR',sans-serif" },
-  statusWrap: { display:"flex",alignItems:"center",gap:6 },
-  dot: { width:8,height:8,borderRadius:"50%",transition:"background 0.3s" },
-  statusText: { fontSize:11,color:"#aaa" },
-  body: { display:"flex", flex:1, overflow:"hidden" },
-  leftPane: { display:"flex",flexDirection:"column",flex:"0 0 50%",borderRight:"1px solid #d4c9b0",overflow:"hidden" },
-  chatArea: { flex:1,overflowY:"auto",padding:"20px 16px",display:"flex",flexDirection:"column",gap:14 },
-  welcome: { textAlign:"center",padding:"28px 16px" },
-  welcomeIcon: { fontSize:36,marginBottom:10 },
-  welcomeTitle: { fontFamily:"'Noto Serif KR',serif",fontSize:18,fontWeight:700,color:"#1a1208",marginBottom:6 },
-  welcomeDesc: { fontSize:12,color:"#7a6e60",lineHeight:1.7,marginBottom:16 },
-  examples: { display:"flex",flexDirection:"column",gap:7,maxWidth:400,margin:"0 auto" },
-  exBtn: { background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:8,padding:"9px 14px",fontSize:12,color:"#1a1208",cursor:"pointer",textAlign:"left",fontFamily:"'Noto Sans KR',sans-serif",lineHeight:1.5 },
-  exLabel: { fontSize:10,fontWeight:700,color:"#b8922a",letterSpacing:0.5,display:"block",marginBottom:2 },
-  msgRow: { display:"flex",gap:8,alignItems:"flex-start" },
-  avatarAi: { width:30,height:30,background:"#1a1208",color:"#f5f0e8",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Serif KR',serif",fontSize:11,fontWeight:700,flexShrink:0 },
-  avatarUser: { width:30,height:30,background:"#b8922a",color:"white",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0 },
-  bubbleAi: { maxWidth:"calc(100% - 60px)",padding:"10px 14px",borderRadius:"10px 10px 10px 3px",background:"#fdfaf4",border:"1px solid #d4c9b0",fontSize:13,lineHeight:1.8,color:"#1a1208" },
-  bubbleUser: { maxWidth:"calc(100% - 60px)",padding:"10px 14px",borderRadius:"10px 10px 3px 10px",background:"#1a1208",color:"#f5f0e8",fontSize:13,lineHeight:1.8 },
-  typing: { display:"flex",alignItems:"center",gap:4,padding:"10px 14px",background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:"10px 10px 10px 3px" },
-  typingDot: { width:6,height:6,background:"#7a6e60",borderRadius:"50%",display:"inline-block",animation:"blink 1.2s infinite" },
-  inputArea: { padding:"10px 14px 14px",background:"#ede6d6",borderTop:"1px solid #d4c9b0",flexShrink:0 },
-  inputRow: { display:"flex",gap:8,alignItems:"flex-end",background:"#fdfaf4",border:"1.5px solid #d4c9b0",borderRadius:10,padding:"7px 7px 7px 12px" },
-  textarea: { flex:1,border:"none",outline:"none",background:"transparent",fontFamily:"'Noto Sans KR',sans-serif",fontSize:13,color:"#1a1208",resize:"none",maxHeight:120,minHeight:22,lineHeight:1.6 },
-  sendBtn: { width:34,height:34,background:"#1a1208",border:"none",borderRadius:7,cursor:"pointer",color:"#f5f0e8",fontSize:13,flexShrink:0 },
-  hint: { fontSize:10,color:"#7a6e60",marginTop:5,textAlign:"center" },
-  rightPane: { display:"flex",flexDirection:"column",flex:"0 0 50%",overflow:"hidden",background:"#fdfaf4" },
-  rightHeader: { display:"flex",alignItems:"center",gap:8,padding:"14px 18px",borderBottom:"1px solid #d4c9b0",background:"#f5f0e8",flexShrink:0 },
-  rightHeaderIcon: { fontSize:16 },
-  rightHeaderTitle: { fontFamily:"'Noto Serif KR',serif",fontSize:14,fontWeight:700,color:"#1a1208",flex:1 },
-  rightHeaderBadge: { fontSize:11,background:"#c0392b",color:"white",padding:"2px 8px",borderRadius:10,fontWeight:500 },
-  lawContent: { flex:1,overflowY:"auto",padding:"16px" },
-  emptyLaw: { display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",padding:40,textAlign:"center" },
-  emptyIcon: { fontSize:40,marginBottom:16,opacity:0.3 },
-  emptyText: { fontSize:13,color:"#7a6e60",lineHeight:1.8,marginBottom:8 },
-  emptySubText: { fontSize:11,color:"#aaa",lineHeight:1.7 },
-  lawNote: { fontSize:11,color:"#7a6e60",marginBottom:12,padding:"8px 12px",background:"#f5f0e8",borderRadius:6,lineHeight:1.6 },
-  lawLink: { display:"block",padding:"14px 16px",border:"1px solid #d4c9b0",borderRadius:8,marginBottom:10,background:"white",textDecoration:"none",color:"inherit",transition:"all 0.2s" },
-  lawLinkActive: { border:"2px solid #c0392b",background:"#fff8f8",animation:"highlight-pulse 1.5s ease-in-out" },
-  highlightBadge: { fontSize:10,color:"#c0392b",fontWeight:700,marginBottom:6,letterSpacing:0.5 },
-  lawLinkTop: { display:"flex",alignItems:"center",gap:8,marginBottom:4 },
-  lawLinkName: { fontFamily:"'Noto Serif KR',serif",fontSize:13,fontWeight:700,color:"#1a1208" },
-  lawLinkArticle: { fontSize:11,background:"#c0392b",color:"white",padding:"2px 7px",borderRadius:10 },
-  lawLinkArticleActive: { background:"#c0392b",boxShadow:"0 0 0 2px #c0392b, 0 0 0 4px rgba(192,57,43,0.2)" },
-  lawLinkDesc: { fontSize:12,color:"#7a6e60",marginBottom:6 },
-  lawLinkUrl: { fontSize:11,color:"#b8922a",fontWeight:500 },
-  lawDirectSearch: { marginTop:20,padding:"14px 16px",border:"1px dashed #d4c9b0",borderRadius:8 },
-  lawDirectTitle: { fontSize:12,fontWeight:700,color:"#1a1208",marginBottom:8 },
-  lawDirectLink: { fontSize:12,color:"#b8922a",fontWeight:500,textDecoration:"none" },
+  root:{display:"flex",flexDirection:"column",height:"100vh",background:"#f5f0e8",fontFamily:"'Noto Sans KR',sans-serif"},
+  header:{background:"#1a1208",color:"#f5f0e8",padding:"0 24px",height:52,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,borderBottom:"3px solid #b8922a"},
+  headerLeft:{display:"flex",alignItems:"center",gap:12},
+  headerRight:{display:"flex",alignItems:"center",gap:14},
+  seal:{width:34,height:34,background:"#c0392b",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Serif KR',serif",fontSize:14,fontWeight:700,color:"white"},
+  headerTitle:{fontFamily:"'Noto Serif KR',serif",fontSize:15,fontWeight:700,letterSpacing:1},
+  headerSub:{fontSize:11,color:"#aaa",fontWeight:300},
+  resetBtn:{background:"transparent",border:"1px solid #555",color:"#ccc",padding:"5px 10px",borderRadius:6,fontSize:11,cursor:"pointer",fontFamily:"'Noto Sans KR',sans-serif"},
+  statusWrap:{display:"flex",alignItems:"center",gap:6},
+  dot:{width:8,height:8,borderRadius:"50%",transition:"background 0.3s"},
+  statusText:{fontSize:11,color:"#aaa"},
+  body:{display:"flex",flex:1,overflow:"hidden"},
+  leftPane:{display:"flex",flexDirection:"column",flex:"0 0 50%",borderRight:"1px solid #d4c9b0",overflow:"hidden"},
+  chatArea:{flex:1,overflowY:"auto",padding:"20px 16px",display:"flex",flexDirection:"column",gap:14},
+  welcome:{textAlign:"center",padding:"28px 16px"},
+  welcomeIcon:{fontSize:36,marginBottom:10},
+  welcomeTitle:{fontFamily:"'Noto Serif KR',serif",fontSize:18,fontWeight:700,color:"#1a1208",marginBottom:6},
+  welcomeDesc:{fontSize:12,color:"#7a6e60",lineHeight:1.7,marginBottom:16},
+  examples:{display:"flex",flexDirection:"column",gap:7,maxWidth:400,margin:"0 auto"},
+  exBtn:{background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:8,padding:"9px 14px",fontSize:12,color:"#1a1208",cursor:"pointer",textAlign:"left",fontFamily:"'Noto Sans KR',sans-serif",lineHeight:1.5},
+  exLabel:{fontSize:10,fontWeight:700,color:"#b8922a",letterSpacing:0.5,display:"block",marginBottom:2},
+  msgRow:{display:"flex",gap:8,alignItems:"flex-start"},
+  avatarAi:{width:30,height:30,background:"#1a1208",color:"#f5f0e8",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Serif KR',serif",fontSize:11,fontWeight:700,flexShrink:0},
+  avatarUser:{width:30,height:30,background:"#b8922a",color:"white",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0},
+  bubbleAi:{maxWidth:"calc(100% - 60px)",padding:"10px 14px",borderRadius:"10px 10px 10px 3px",background:"#fdfaf4",border:"1px solid #d4c9b0",fontSize:13,lineHeight:1.8,color:"#1a1208"},
+  bubbleUser:{maxWidth:"calc(100% - 60px)",padding:"10px 14px",borderRadius:"10px 10px 3px 10px",background:"#1a1208",color:"#f5f0e8",fontSize:13,lineHeight:1.8},
+  typing:{display:"flex",alignItems:"center",gap:4,padding:"10px 14px",background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:"10px 10px 10px 3px"},
+  typingDot:{width:6,height:6,background:"#7a6e60",borderRadius:"50%",display:"inline-block",animation:"blink 1.2s infinite"},
+  inputArea:{padding:"10px 14px 14px",background:"#ede6d6",borderTop:"1px solid #d4c9b0",flexShrink:0},
+  inputRow:{display:"flex",gap:8,alignItems:"flex-end",background:"#fdfaf4",border:"1.5px solid #d4c9b0",borderRadius:10,padding:"7px 7px 7px 12px"},
+  textarea:{flex:1,border:"none",outline:"none",background:"transparent",fontFamily:"'Noto Sans KR',sans-serif",fontSize:13,color:"#1a1208",resize:"none",maxHeight:120,minHeight:22,lineHeight:1.6},
+  sendBtn:{width:34,height:34,background:"#1a1208",border:"none",borderRadius:7,cursor:"pointer",color:"#f5f0e8",fontSize:13,flexShrink:0},
+  hint:{fontSize:10,color:"#7a6e60",marginTop:5,textAlign:"center"},
+  rightPane:{display:"flex",flexDirection:"column",flex:"0 0 50%",overflow:"hidden",background:"#fdfaf4"},
+  rightHeader:{display:"flex",alignItems:"center",gap:8,padding:"14px 18px",borderBottom:"1px solid #d4c9b0",background:"#f5f0e8",flexShrink:0},
+  rightHeaderIcon:{fontSize:16},
+  rightHeaderTitle:{fontFamily:"'Noto Serif KR',serif",fontSize:14,fontWeight:700,color:"#1a1208",flex:1},
+  rightHeaderBadge:{fontSize:11,background:"#c0392b",color:"white",padding:"2px 8px",borderRadius:10,fontWeight:500},
+  lawContent:{flex:1,overflowY:"auto",padding:"16px"},
+  emptyLaw:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",padding:40,textAlign:"center"},
+  emptyIcon:{fontSize:40,marginBottom:16,opacity:0.3},
+  emptyText:{fontSize:13,color:"#7a6e60",lineHeight:1.8,marginBottom:8},
+  emptySubText:{fontSize:11,color:"#aaa",lineHeight:1.7},
+  lawNote:{fontSize:11,color:"#7a6e60",marginBottom:12,padding:"8px 12px",background:"#f5f0e8",borderRadius:6,lineHeight:1.6},
+  lawLink:{display:"block",padding:"14px 16px",border:"1px solid #d4c9b0",borderRadius:8,marginBottom:10,background:"white",textDecoration:"none",color:"inherit",transition:"all 0.2s"},
+  lawLinkActive:{border:"2px solid #c0392b",background:"#fff8f8",animation:"highlight-pulse 1.5s ease-in-out"},
+  highlightBadge:{fontSize:10,color:"#c0392b",fontWeight:700,marginBottom:6,letterSpacing:0.5},
+  lawLinkTop:{display:"flex",alignItems:"center",gap:8,marginBottom:4},
+  lawLinkName:{fontFamily:"'Noto Serif KR',serif",fontSize:13,fontWeight:700,color:"#1a1208"},
+  lawLinkArticle:{fontSize:11,background:"#c0392b",color:"white",padding:"2px 7px",borderRadius:10},
+  lawLinkArticleActive:{background:"#c0392b",boxShadow:"0 0 0 2px #c0392b,0 0 0 4px rgba(192,57,43,0.2)"},
+  lawLinkDesc:{fontSize:12,color:"#7a6e60",marginBottom:6},
+  lawLinkUrl:{fontSize:11,color:"#b8922a",fontWeight:500},
+  lawDirectSearch:{marginTop:20,padding:"14px 16px",border:"1px dashed #d4c9b0",borderRadius:8},
+  lawDirectTitle:{fontSize:12,fontWeight:700,color:"#1a1208",marginBottom:8},
+  lawDirectLink:{fontSize:12,color:"#b8922a",fontWeight:500,textDecoration:"none"},
 };
