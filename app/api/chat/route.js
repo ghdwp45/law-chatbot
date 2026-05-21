@@ -26,11 +26,17 @@ export async function POST(req) {
 
 주의: 반드시 MCP 도구로 실제 데이터를 조회하여 답변하세요. 한국어로만 답변.`,
         messages: msgs,
+        mcp_servers: [
+          {
+            type: "url",
+            url: "https://korean-law-mcp.fly.dev/mcp",
+            name: "korean-law",
+          },
+        ],
         tools: [
           {
             type: "mcp_toolset",
             mcp_server_name: "korean-law",
-            mcp_server_url: "https://korean-law-mcp.fly.dev/mcp",
           },
         ],
       }),
@@ -38,7 +44,6 @@ export async function POST(req) {
     return res;
   };
 
-  // 최대 5번 루프 (MCP 도구 호출 처리)
   let currentMessages = [...messages];
   let finalText = "";
 
@@ -55,13 +60,11 @@ export async function POST(req) {
 
     const stopReason = data.stop_reason;
 
-    // 텍스트 블록 추출
     const textBlocks = data.content.filter((b) => b.type === "text");
     if (textBlocks.length > 0) {
       finalText = textBlocks.map((b) => b.text).join("\n");
     }
 
-    // 도구 호출이 있으면 결과를 다시 넘김
     if (stopReason === "tool_use") {
       currentMessages.push({ role: "assistant", content: data.content });
 
