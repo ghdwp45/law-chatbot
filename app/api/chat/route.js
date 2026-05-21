@@ -10,7 +10,7 @@ export async function POST(req) {
       "anthropic-beta": "mcp-client-2025-04-04",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 3000,
       system: `당신은 한국 법령 전문 AI 어시스턴트입니다. Korean Law MCP 도구를 활용하여 법령 정보를 조회하고 답변합니다.
 
