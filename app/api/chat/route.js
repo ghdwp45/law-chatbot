@@ -29,8 +29,8 @@ export async function POST(req) {
         tools: [
           {
             type: "mcp_toolset",
-            server_label: "korean-law",
-            server_url: "https://korean-law-mcp.fly.dev/mcp",
+            mcp_server_name: "korean-law",
+            mcp_server_url: "https://korean-law-mcp.fly.dev/mcp",
           },
         ],
       }),
