@@ -8,7 +8,7 @@ export async function POST(req) {
         "Content-Type": "application/json",
         "x-api-key": process.env.ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": "mcp-client-2025-04-04",
+        "anthropic-beta": "mcp-client-2025-11-20",
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-5",
@@ -26,11 +26,20 @@ export async function POST(req) {
 
 주의: 반드시 MCP 도구로 실제 데이터를 조회하여 답변하세요. 한국어로만 답변.`,
         messages: msgs,
-        mcp_servers: [
+        tools: [
           {
-            type: "url",
-            url: "https://korean-law-mcp.fly.dev/mcp",
-            name: "korean-law",
+            type: "mcp",
+            server_label: "korean-law",
+            server_url: "https://korean-law-mcp.fly.dev/mcp",
+            allowed_tools: [
+              "search_law",
+              "get_law_text",
+              "search_precedents",
+              "get_precedent_text",
+              "search_interpretations",
+              "chain_full_research",
+              "chain_law_system",
+            ],
           },
         ],
       }),
@@ -47,7 +56,10 @@ export async function POST(req) {
     const data = await response.json();
 
     if (!response.ok) {
-      return Response.json({ error: data.error?.message || "API 오류" }, { status: response.status });
+      return Response.json(
+        { error: data.error?.message || "API 오류" },
+        { status: response.status }
+      );
     }
 
     const stopReason = data.stop_reason;
@@ -58,18 +70,16 @@ export async function POST(req) {
       finalText = textBlocks.map((b) => b.text).join("\n");
     }
 
-    // MCP 도구 호출이 있으면 결과를 다시 넘김
-    if (stopReason === "tool_use" || stopReason === "mcp_tool_use") {
-      // assistant 메시지 추가
+    // 도구 호출이 있으면 결과를 다시 넘김
+    if (stopReason === "tool_use") {
       currentMessages.push({ role: "assistant", content: data.content });
 
-      // tool_result 메시지 구성
       const toolResults = data.content
-        .filter((b) => b.type === "tool_use" || b.type === "mcp_tool_use")
+        .filter((b) => b.type === "tool_use")
         .map((b) => ({
           type: "tool_result",
           tool_use_id: b.id,
-          content: "도구 결과를 처리 중입니다.",
+          content: b.output || "",
         }));
 
       if (toolResults.length > 0) {
@@ -78,7 +88,6 @@ export async function POST(req) {
       continue;
     }
 
-    // end_turn이면 완료
     break;
   }
 
