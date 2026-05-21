@@ -8,23 +8,18 @@ const EXAMPLES = [
   { label: "⚠️ 처벌 규정", q: "공정거래법 위반 시 처벌 규정 알려줘" },
 ];
 
-// 법제처 검색 URL 생성
-const getLawUrl = (lawName, articleNo) => {
-  const query = encodeURIComponent(lawName);
-  return `https://www.law.go.kr/lsInfoP.do?lsiSeq=&efYd=&lsId=&urlMode=lsInfoP&viewCls=lsRvsDocInfoR#J${articleNo || ""}`;
-};
-
-const getLawSearchUrl = (lawName) => {
-  return `https://www.law.go.kr/lsSc.do?section=&menuId=1&subMenuId=15&tabMenuId=81&eventGubun=060101&query=${encodeURIComponent(lawName)}`;
-};
+const getLawSearchUrl = (lawName) =>
+  `https://www.law.go.kr/lsSc.do?section=&menuId=1&subMenuId=15&tabMenuId=81&eventGubun=060101&query=${encodeURIComponent(lawName)}`;
 
 export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [lawLinks, setLawLinks] = useState([]);
+  const [activeArticle, setActiveArticle] = useState(null);
   const chatRef = useRef(null);
   const textareaRef = useRef(null);
+  const linkRefs = useRef({});
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -33,9 +28,7 @@ export default function Home() {
   const parseResponse = (text) => {
     const explainMatch = text.match(/===해설===([\s\S]*?)===해설끝===/);
     const lawMatch = text.match(/===관련법령===([\s\S]*?)===관련법령끝===/);
-
     const explainText = explainMatch ? explainMatch[1].trim() : text;
-
     const links = [];
     if (lawMatch) {
       const lines = lawMatch[1].trim().split("\n").filter(l => l.includes("|"));
@@ -50,22 +43,36 @@ export default function Home() {
         }
       });
     }
-
     return { explainText, links };
+  };
+
+  const handleArticleClick = (articleNo) => {
+    setActiveArticle(articleNo);
+    // 해당 조문 카드로 스크롤
+    const key = articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
+    if (key && linkRefs.current[key]) {
+      linkRefs.current[key].scrollIntoView({ behavior: "smooth", block: "center" });
+    }
   };
 
   const formatExplain = (text) => {
     return text
       .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-      .replace(/(제\d+조(?:의\d+)?)/g, `<span class="law-ref">$1</span>`)
+      .replace(/(제\d+조(?:의\d+)?(?:\s*제\d+항)?(?:\s*제\d+호)?)/g,
+        `<span class="law-ref" onclick="window._clickArticle('$1')">$1</span>`)
       .replace(/\n/g, "<br/>");
   };
+
+  useEffect(() => {
+    window._clickArticle = handleArticleClick;
+  }, [lawLinks]);
 
   const send = async (text) => {
     const userText = text || input.trim();
     if (!userText || loading) return;
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+    setActiveArticle(null);
 
     const newMessages = [...messages, { role: "user", content: userText }];
     setMessages(newMessages);
@@ -107,6 +114,7 @@ export default function Home() {
     if (confirm("대화 내용을 초기화하시겠습니까?")) {
       setMessages([]);
       setLawLinks([]);
+      setActiveArticle(null);
     }
   };
 
@@ -137,7 +145,7 @@ export default function Home() {
               <div style={s.welcome}>
                 <div style={s.welcomeIcon}>⚖️</div>
                 <h2 style={s.welcomeTitle}>한국 법령 AI 어시스턴트</h2>
-                <p style={s.welcomeDesc}>법령 해설부터 관련 조문 검색까지<br/>국가법령정보센터와 연동하여 답변드립니다</p>
+                <p style={s.welcomeDesc}>법령 해설부터 관련 조문 검색까지<br/>답변의 <span style={{color:"#c0392b",fontWeight:600}}>조문번호</span>를 클릭하면 오른쪽에서 하이라이트됩니다</p>
                 <div style={s.examples}>
                   {EXAMPLES.map((ex) => (
                     <button key={ex.q} style={s.exBtn} onClick={() => send(ex.q)}>
@@ -183,7 +191,7 @@ export default function Home() {
               />
               <button style={{...s.sendBtn, opacity: loading ? 0.4 : 1}} onClick={() => send()} disabled={loading}>▶</button>
             </div>
-            <div style={s.hint}>Enter 전송 · Shift+Enter 줄바꿈 · 법률 전문가 검토를 권장합니다</div>
+            <div style={s.hint}>Enter 전송 · Shift+Enter 줄바꿈 · 답변의 <span style={{color:"#c0392b",fontWeight:600}}>조문번호</span> 클릭 시 오른쪽 하이라이트</div>
           </div>
         </div>
 
@@ -207,33 +215,37 @@ export default function Home() {
             ) : (
               <div>
                 <div style={s.lawNote}>
-                  아래 링크를 클릭하면 국가법령정보센터에서 원문을 확인할 수 있습니다
+                  💡 왼쪽 답변의 <strong>조문번호</strong>를 클릭하면 해당 법령이 하이라이트됩니다
                 </div>
-                {lawLinks.map((link, i) => (
-                  <a
-                    key={i}
-                    href={getLawSearchUrl(link.lawName)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={s.lawLink}
-                  >
-                    <div style={s.lawLinkTop}>
-                      <span style={s.lawLinkName}>{link.lawName}</span>
-                      <span style={s.lawLinkArticle}>{link.articleNo}</span>
-                    </div>
-                    {link.desc && <div style={s.lawLinkDesc}>{link.desc}</div>}
-                    <div style={s.lawLinkUrl}>🔗 law.go.kr에서 원문 보기 →</div>
-                  </a>
-                ))}
+                {lawLinks.map((link, i) => {
+                  const key = link.articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
+                  const isActive = activeArticle && (
+                    link.articleNo.includes(activeArticle.match(/제\d+조(?:의\d+)?/)?.[0] || activeArticle)
+                    || link.lawName.includes(activeArticle)
+                  );
+                  return (
+                    <a
+                      key={i}
+                      ref={el => { if (key) linkRefs.current[key] = el; }}
+                      href={getLawSearchUrl(link.lawName)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{...s.lawLink, ...(isActive ? s.lawLinkActive : {})}}
+                    >
+                      {isActive && <div style={s.highlightBadge}>👆 현재 선택된 조문</div>}
+                      <div style={s.lawLinkTop}>
+                        <span style={s.lawLinkName}>{link.lawName}</span>
+                        <span style={{...s.lawLinkArticle, ...(isActive ? s.lawLinkArticleActive : {})}}>{link.articleNo}</span>
+                      </div>
+                      {link.desc && <div style={s.lawLinkDesc}>{link.desc}</div>}
+                      <div style={s.lawLinkUrl}>🔗 law.go.kr에서 원문 보기 →</div>
+                    </a>
+                  );
+                })}
 
                 <div style={s.lawDirectSearch}>
                   <div style={s.lawDirectTitle}>📌 직접 검색</div>
-                  <a
-                    href="https://www.law.go.kr"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={s.lawDirectLink}
-                  >
+                  <a href="https://www.law.go.kr" target="_blank" rel="noopener noreferrer" style={s.lawDirectLink}>
                     국가법령정보센터 바로가기 →
                   </a>
                 </div>
@@ -250,7 +262,16 @@ export default function Home() {
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: #d4c9b0; border-radius: 2px; }
         @keyframes blink { 0%,60%,100%{transform:translateY(0);opacity:.4} 30%{transform:translateY(-5px);opacity:1} }
-        .law-ref { color: #c0392b; font-weight: 600; }
+        @keyframes highlight-pulse { 0%,100%{box-shadow:0 0 0 3px rgba(192,57,43,0.3)} 50%{box-shadow:0 0 0 6px rgba(192,57,43,0.1)} }
+        .law-ref {
+          color: #c0392b;
+          font-weight: 700;
+          cursor: pointer;
+          border-bottom: 1.5px dashed #c0392b;
+          padding: 0 2px;
+          transition: background 0.15s;
+        }
+        .law-ref:hover { background: #fde8e8; border-radius: 3px; }
       `}</style>
     </div>
   );
@@ -301,13 +322,16 @@ const s = {
   emptyText: { fontSize:13,color:"#7a6e60",lineHeight:1.8,marginBottom:8 },
   emptySubText: { fontSize:11,color:"#aaa",lineHeight:1.7 },
   lawNote: { fontSize:11,color:"#7a6e60",marginBottom:12,padding:"8px 12px",background:"#f5f0e8",borderRadius:6,lineHeight:1.6 },
-  lawLink: { display:"block",padding:"14px 16px",border:"1px solid #d4c9b0",borderRadius:8,marginBottom:10,background:"white",textDecoration:"none",color:"inherit",transition:"all 0.2s",cursor:"pointer" },
+  lawLink: { display:"block",padding:"14px 16px",border:"1px solid #d4c9b0",borderRadius:8,marginBottom:10,background:"white",textDecoration:"none",color:"inherit",transition:"all 0.2s" },
+  lawLinkActive: { border:"2px solid #c0392b",background:"#fff8f8",animation:"highlight-pulse 1.5s ease-in-out" },
+  highlightBadge: { fontSize:10,color:"#c0392b",fontWeight:700,marginBottom:6,letterSpacing:0.5 },
   lawLinkTop: { display:"flex",alignItems:"center",gap:8,marginBottom:4 },
   lawLinkName: { fontFamily:"'Noto Serif KR',serif",fontSize:13,fontWeight:700,color:"#1a1208" },
   lawLinkArticle: { fontSize:11,background:"#c0392b",color:"white",padding:"2px 7px",borderRadius:10 },
+  lawLinkArticleActive: { background:"#c0392b",boxShadow:"0 0 0 2px #c0392b, 0 0 0 4px rgba(192,57,43,0.2)" },
   lawLinkDesc: { fontSize:12,color:"#7a6e60",marginBottom:6 },
   lawLinkUrl: { fontSize:11,color:"#b8922a",fontWeight:500 },
-  lawDirectSearch: { marginTop:20,padding:"14px 16px",border:"1px dashed #d4c9b0",borderRadius:8,background:"#fdfaf4" },
+  lawDirectSearch: { marginTop:20,padding:"14px 16px",border:"1px dashed #d4c9b0",borderRadius:8 },
   lawDirectTitle: { fontSize:12,fontWeight:700,color:"#1a1208",marginBottom:8 },
   lawDirectLink: { fontSize:12,color:"#b8922a",fontWeight:500,textDecoration:"none" },
 };
