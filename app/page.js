@@ -12,8 +12,8 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [lawPanels, setLawPanels] = useState([]); // [{title, articles: [{no, content}]}]
-  const [activeRef, setActiveRef] = useState(null); // 현재 하이라이트된 조문
+  const [lawPanels, setLawPanels] = useState([]);
+  const [activeRef, setActiveRef] = useState(null);
   const chatRef = useRef(null);
   const textareaRef = useRef(null);
   const lawRefs = useRef({});
@@ -22,48 +22,43 @@ export default function Home() {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, loading]);
 
-  // 답변에서 법령 원문 파싱
-  const parseLawFromResponse = (text) => {
+  // 응답에서 원문/해설 분리
+  const parseResponse = (text) => {
+    const lawMatch = text.match(/===법령원문===([\s\S]*?)===법령원문끝===/);
+    const explainMatch = text.match(/===해설===([\s\S]*?)===해설끝===/);
+
+    const lawText = lawMatch ? lawMatch[1].trim() : "";
+    const explainText = explainMatch ? explainMatch[1].trim() : text;
+
+    // 법령 원문 파싱
     const panels = [];
-    // [법령명 제X조] 패턴 찾기
-    const lawBlocks = text.match(/【[^】]+】[\s\S]*?(?=【|$)/g) || [];
-    
-    if (lawBlocks.length > 0) {
+    if (lawText) {
+      const lawBlocks = lawText.split(/(?=【[^】]+】)/).filter(b => b.trim());
       lawBlocks.forEach(block => {
         const titleMatch = block.match(/【([^】]+)】/);
         if (!titleMatch) return;
         const title = titleMatch[1];
         const content = block.replace(/【[^】]+】/, "").trim();
         const articles = [];
-        // 제X조 단위로 분리
-        const artMatches = content.split(/(?=제\d+조)/);
-        artMatches.forEach(art => {
-          if (art.trim()) {
-            const noMatch = art.match(/^(제\d+조[^\n]*)/);
+        const artBlocks = content.split(/(?=제\d+조)/).filter(a => a.trim());
+        artBlocks.forEach(art => {
+          const noMatch = art.match(/^(제\d+조(?:의\d+)?)([^\n]*)/);
+          if (noMatch) {
             articles.push({
-              no: noMatch ? noMatch[1] : "조문",
+              no: noMatch[1],
+              title: noMatch[2].trim(),
               content: art.trim()
             });
           }
         });
-        panels.push({ title, articles });
+        if (articles.length > 0) panels.push({ title, articles });
       });
-    } else {
-      // 패턴 없으면 전체 텍스트에서 조문 추출 시도
-      const artMatches = text.match(/제\d+조[^\n]*/g);
-      if (artMatches && artMatches.length > 0) {
-        panels.push({
-          title: "관련 법령",
-          articles: artMatches.map(a => ({ no: a, content: a }))
-        });
-      }
     }
-    return panels;
+
+    return { explainText, panels };
   };
 
-  // 답변 텍스트에서 법령 인용 부분 하이라이트
-  const formatWithHighlight = (text) => {
-    // 조문 번호 패턴에 클릭 이벤트 추가
+  const formatExplain = (text) => {
     return text
       .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
       .replace(/(제\d+조(?:의\d+)?(?:\s*제\d+항)?(?:\s*제\d+호)?)/g,
@@ -90,12 +85,11 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "오류 발생");
 
-      const assistantMsg = { role: "assistant", content: data.text };
+      const { explainText, panels } = parseResponse(data.text);
+      const assistantMsg = { role: "assistant", content: explainText, rawContent: data.text };
       setMessages([...newMessages, assistantMsg]);
 
-      // 법령 원문 파싱해서 오른쪽 패널에 추가
-      const parsed = parseLawFromResponse(data.text);
-      if (parsed.length > 0) setLawPanels(parsed);
+      if (panels.length > 0) setLawPanels(panels);
 
     } catch (e) {
       setMessages([...newMessages, { role: "assistant", content: `❌ ${e.message}` }]);
@@ -104,13 +98,14 @@ export default function Home() {
     }
   };
 
-  // 조문 클릭 시 오른쪽 패널에서 해당 조문 하이라이트
   useEffect(() => {
     window.highlightLaw = (ref) => {
       setActiveRef(ref);
-      // 해당 조문으로 스크롤
-      const el = lawRefs.current[ref];
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      const refKey = ref.match(/제\d+조(?:의\d+)?/)?.[0];
+      if (refKey) {
+        const el = lawRefs.current[refKey];
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
     };
   }, []);
 
@@ -123,9 +118,17 @@ export default function Home() {
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
   };
 
+  const resetChat = () => {
+    if (messages.length === 0) return;
+    if (confirm("대화 내용을 초기화하시겠습니까?")) {
+      setMessages([]);
+      setLawPanels([]);
+      setActiveRef(null);
+    }
+  };
+
   return (
     <div style={s.root}>
-      {/* HEADER */}
       <header style={s.header}>
         <div style={s.headerLeft}>
           <div style={s.seal}>법</div>
@@ -134,16 +137,16 @@ export default function Home() {
             <div style={s.headerSub}>국가법령정보 기반 · Korean Law MCP</div>
           </div>
         </div>
-        <div style={s.statusWrap}>
-          <div style={{...s.dot, background: loading ? "#f39c12" : "#2ecc71"}} />
-          <span style={s.statusText}>{loading ? "조회 중..." : "연결됨"}</span>
+        <div style={s.headerRight}>
+          <button onClick={resetChat} style={s.resetBtn} title="대화 초기화">⟳ 초기화</button>
+          <div style={s.statusWrap}>
+            <div style={{...s.dot, background: loading ? "#f39c12" : "#2ecc71"}} />
+            <span style={s.statusText}>{loading ? "조회 중..." : "연결됨"}</span>
+          </div>
         </div>
       </header>
 
-      {/* BODY: 좌우 분할 */}
       <div style={s.body}>
-
-        {/* 왼쪽: 채팅 */}
         <div style={s.leftPane}>
           <div style={s.chatArea} ref={chatRef}>
             {messages.length === 0 && (
@@ -167,7 +170,7 @@ export default function Home() {
                 {m.role === "assistant" && <div style={s.avatarAi}>법</div>}
                 <div
                   style={m.role === "user" ? s.bubbleUser : s.bubbleAi}
-                  dangerouslySetInnerHTML={{ __html: m.role === "assistant" ? formatWithHighlight(m.content) : m.content }}
+                  dangerouslySetInnerHTML={{ __html: m.role === "assistant" ? formatExplain(m.content) : m.content }}
                 />
                 {m.role === "user" && <div style={s.avatarUser}>나</div>}
               </div>
@@ -183,7 +186,6 @@ export default function Home() {
             )}
           </div>
 
-          {/* 입력창 */}
           <div style={s.inputArea}>
             <div style={s.inputRow}>
               <textarea
@@ -201,7 +203,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 오른쪽: 법령 원문 패널 */}
         <div style={s.rightPane}>
           <div style={s.rightHeader}>
             <span style={s.rightHeaderIcon}>📜</span>
@@ -223,16 +224,15 @@ export default function Home() {
                 <div key={pi} style={s.lawPanel}>
                   <div style={s.lawPanelTitle}>{panel.title}</div>
                   {panel.articles.map((art, ai) => {
-                    const refKey = art.no.match(/제\d+조/)?.[0] || art.no;
-                    const isActive = activeRef && art.no.includes(activeRef.match(/제\d+조/)?.[0] || activeRef);
+                    const isActive = activeRef && (art.no === activeRef.match(/제\d+조(?:의\d+)?/)?.[0]);
                     return (
                       <div
                         key={ai}
-                        ref={el => lawRefs.current[refKey] = el}
+                        ref={el => lawRefs.current[art.no] = el}
                         style={{...s.article, ...(isActive ? s.articleActive : {})}}
                       >
-                        <div style={s.articleNo}>{art.no}</div>
-                        <div style={s.articleContent}>{art.content}</div>
+                        <div style={s.articleNo}>{art.no} {art.title}</div>
+                        <div style={s.articleContent}>{art.content.replace(/^제\d+조(?:의\d+)?[^\n]*\n?/, "").trim()}</div>
                       </div>
                     );
                   })}
@@ -256,7 +256,6 @@ export default function Home() {
           cursor: pointer;
           border-bottom: 1px dashed #c0392b;
           padding: 0 1px;
-          transition: background 0.15s;
         }
         .law-ref:hover { background: #fde8e8; border-radius: 2px; }
       `}</style>
@@ -268,16 +267,15 @@ const s = {
   root: { display:"flex", flexDirection:"column", height:"100vh", background:"#f5f0e8", fontFamily:"'Noto Sans KR',sans-serif" },
   header: { background:"#1a1208", color:"#f5f0e8", padding:"0 24px", height:52, display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0, borderBottom:"3px solid #b8922a" },
   headerLeft: { display:"flex", alignItems:"center", gap:12 },
+  headerRight: { display:"flex", alignItems:"center", gap:14 },
   seal: { width:34,height:34,background:"#c0392b",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Serif KR',serif",fontSize:14,fontWeight:700,color:"white" },
   headerTitle: { fontFamily:"'Noto Serif KR',serif",fontSize:15,fontWeight:700,letterSpacing:1 },
   headerSub: { fontSize:11,color:"#aaa",fontWeight:300 },
+  resetBtn: { background:"transparent",border:"1px solid #555",color:"#ccc",padding:"5px 10px",borderRadius:6,fontSize:11,cursor:"pointer",fontFamily:"'Noto Sans KR',sans-serif" },
   statusWrap: { display:"flex",alignItems:"center",gap:6 },
   dot: { width:8,height:8,borderRadius:"50%",transition:"background 0.3s" },
   statusText: { fontSize:11,color:"#aaa" },
-
   body: { display:"flex", flex:1, overflow:"hidden" },
-
-  // 왼쪽 채팅
   leftPane: { display:"flex",flexDirection:"column",flex:"0 0 50%",borderRight:"1px solid #d4c9b0",overflow:"hidden" },
   chatArea: { flex:1,overflowY:"auto",padding:"20px 16px",display:"flex",flexDirection:"column",gap:14 },
   welcome: { textAlign:"center",padding:"28px 16px" },
@@ -299,8 +297,6 @@ const s = {
   textarea: { flex:1,border:"none",outline:"none",background:"transparent",fontFamily:"'Noto Sans KR',sans-serif",fontSize:13,color:"#1a1208",resize:"none",maxHeight:120,minHeight:22,lineHeight:1.6 },
   sendBtn: { width:34,height:34,background:"#1a1208",border:"none",borderRadius:7,cursor:"pointer",color:"#f5f0e8",fontSize:13,flexShrink:0 },
   hint: { fontSize:10,color:"#7a6e60",marginTop:5,textAlign:"center" },
-
-  // 오른쪽 법령 원문
   rightPane: { display:"flex",flexDirection:"column",flex:"0 0 50%",overflow:"hidden",background:"#fdfaf4" },
   rightHeader: { display:"flex",alignItems:"center",gap:8,padding:"14px 18px",borderBottom:"1px solid #d4c9b0",background:"#f5f0e8",flexShrink:0 },
   rightHeaderIcon: { fontSize:16 },
@@ -312,9 +308,9 @@ const s = {
   emptyText: { fontSize:13,color:"#7a6e60",lineHeight:1.8,marginBottom:8 },
   emptySubText: { fontSize:11,color:"#aaa",lineHeight:1.7 },
   lawPanel: { marginBottom:20 },
-  lawPanelTitle: { fontFamily:"'Noto Serif KR',serif",fontSize:13,fontWeight:700,color:"#1a1208",padding:"8px 12px",background:"#1a1208",color:"#f5f0e8",borderRadius:"6px 6px 0 0",letterSpacing:0.5 },
-  article: { padding:"12px 14px",borderLeft:"3px solid #d4c9b0",borderRight:"1px solid #e8e0d0",borderBottom:"1px solid #e8e0d0",background:"white",transition:"all 0.2s",cursor:"default" },
+  lawPanelTitle: { fontFamily:"'Noto Serif KR',serif",fontSize:13,fontWeight:700,padding:"8px 12px",background:"#1a1208",color:"#f5f0e8",borderRadius:"6px 6px 0 0",letterSpacing:0.5 },
+  article: { padding:"12px 14px",borderLeft:"3px solid #d4c9b0",borderRight:"1px solid #e8e0d0",borderBottom:"1px solid #e8e0d0",background:"white",transition:"all 0.2s" },
   articleActive: { borderLeft:"3px solid #c0392b",background:"#fff8f8",boxShadow:"0 2px 8px rgba(192,57,43,0.1)" },
-  articleNo: { fontSize:11,fontWeight:700,color:"#c0392b",marginBottom:4,letterSpacing:0.5 },
+  articleNo: { fontSize:11,fontWeight:700,color:"#c0392b",marginBottom:6,letterSpacing:0.5 },
   articleContent: { fontSize:12,lineHeight:1.9,color:"#2c2416",whiteSpace:"pre-wrap" },
 };
