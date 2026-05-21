@@ -28,18 +28,9 @@ export async function POST(req) {
         messages: msgs,
         tools: [
           {
-            type: "mcp",
+            type: "mcp_toolset",
             server_label: "korean-law",
             server_url: "https://korean-law-mcp.fly.dev/mcp",
-            allowed_tools: [
-              "search_law",
-              "get_law_text",
-              "search_precedents",
-              "get_precedent_text",
-              "search_interpretations",
-              "chain_full_research",
-              "chain_law_system",
-            ],
           },
         ],
       }),
