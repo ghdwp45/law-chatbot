@@ -84,17 +84,52 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: newMessages.map(({ role, content }) => ({ role, content })) }),
       });
-      const rawText = await res.text();
-      let data;
-      try { data = JSON.parse(rawText); } catch { throw new Error("서버 오류: " + rawText.slice(0, 200)); }
-      if (!res.ok) throw new Error(data.error || "오류 발생");
 
-      const { explainText, links } = parseResponse(data.text);
-      setMessages([...newMessages, { role: "assistant", content: explainText }]);
-      if (links.length > 0) setLawLinks(links);
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "오류 발생");
+      }
+
+      // 스트리밍 수신
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let fullText = "";
+      let streamMsg = { role: "assistant", content: "" };
+      setMessages(prev => [...prev, streamMsg]);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("
+").filter(l => l.startsWith("data: "));
+        for (const line of lines) {
+          try {
+            const parsed = JSON.parse(line.slice(6));
+            if (parsed.text) {
+              fullText += parsed.text;
+              setMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: "assistant", content: fullText };
+                return updated;
+              });
+            }
+            if (parsed.done && parsed.full) {
+              const { explainText, links } = parseResponse(parsed.full);
+              setMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: "assistant", content: explainText };
+                return updated;
+              });
+              if (links.length > 0) setLawLinks(links);
+            }
+            if (parsed.error) throw new Error(parsed.error);
+          } catch {}
+        }
+      }
 
     } catch (e) {
-      setMessages([...newMessages, { role: "assistant", content: `❌ ${e.message}` }]);
+      setMessages(prev => [...prev.slice(0, -1), { role: "assistant", content: `❌ ${e.message}` }]);
     } finally {
       setLoading(false);
     }
