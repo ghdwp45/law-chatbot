@@ -1,55 +1,86 @@
 export async function POST(req) {
   const { messages } = await req.json();
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "mcp-client-2025-04-04",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-5",
-      max_tokens: 3000,
-      system: `당신은 한국 법령 전문 AI 어시스턴트입니다. Korean Law MCP 도구를 활용하여 법령 정보를 조회하고 답변합니다.
+  const callAPI = async (msgs) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "mcp-client-2025-04-04",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-5",
+        max_tokens: 4000,
+        system: `당신은 한국 법령 전문 AI 어시스턴트입니다. Korean Law MCP 도구를 반드시 사용하여 실제 법령 데이터를 조회하고 답변합니다.
 
 답변 형식을 반드시 다음과 같이 구성하세요:
 
-1. 먼저 법령 원문을 아래 형식으로 제시:
+1. 먼저 조회한 법령 원문을 아래 형식으로 제시:
 【법령명】
 제X조(조문제목) 조문 내용 전체...
-제Y조(조문제목) 조문 내용 전체...
 
-2. 그 아래에 쉬운 해설 제공 (일반인이 이해할 수 있게)
-3. 답변에서 조문을 언급할 때 반드시 "제X조" 형식으로 표기
+2. 그 아래에 쉬운 해설 제공
+3. 조문 언급 시 반드시 "제X조" 형식으로 표기
 
-주의사항:
-- 반드시 실제 법령 데이터를 MCP 도구로 조회하여 답변
-- 법령 원문은 정확하게 인용
-- 필요시 "법적 효력이 있는 해석이 아님"을 안내
-- 한국어로만 답변`,
-      messages,
-      mcp_servers: [
-        {
-          type: "url",
-          url: "https://korean-law-mcp.fly.dev/mcp",
-          name: "korean-law",
-        },
-      ],
-    }),
-  });
+주의: 반드시 MCP 도구로 실제 데이터를 조회하여 답변하세요. 한국어로만 답변.`,
+        messages: msgs,
+        mcp_servers: [
+          {
+            type: "url",
+            url: "https://korean-law-mcp.fly.dev/mcp",
+            name: "korean-law",
+          },
+        ],
+      }),
+    });
+    return res;
+  };
 
-  const data = await response.json();
+  // 최대 5번 루프 (MCP 도구 호출 처리)
+  let currentMessages = [...messages];
+  let finalText = "";
 
-  if (!response.ok) {
-    return Response.json({ error: data.error?.message || "API 오류" }, { status: response.status });
+  for (let i = 0; i < 5; i++) {
+    const response = await callAPI(currentMessages);
+    const data = await response.json();
+
+    if (!response.ok) {
+      return Response.json({ error: data.error?.message || "API 오류" }, { status: response.status });
+    }
+
+    const stopReason = data.stop_reason;
+
+    // 텍스트 블록 추출
+    const textBlocks = data.content.filter((b) => b.type === "text");
+    if (textBlocks.length > 0) {
+      finalText = textBlocks.map((b) => b.text).join("\n");
+    }
+
+    // MCP 도구 호출이 있으면 결과를 다시 넘김
+    if (stopReason === "tool_use" || stopReason === "mcp_tool_use") {
+      // assistant 메시지 추가
+      currentMessages.push({ role: "assistant", content: data.content });
+
+      // tool_result 메시지 구성
+      const toolResults = data.content
+        .filter((b) => b.type === "tool_use" || b.type === "mcp_tool_use")
+        .map((b) => ({
+          type: "tool_result",
+          tool_use_id: b.id,
+          content: "도구 결과를 처리 중입니다.",
+        }));
+
+      if (toolResults.length > 0) {
+        currentMessages.push({ role: "user", content: toolResults });
+      }
+      continue;
+    }
+
+    // end_turn이면 완료
+    break;
   }
 
-  const text = data.content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("\n");
-
-  return Response.json({ text });
+  return Response.json({ text: finalText || "답변을 생성하지 못했습니다." });
 }
