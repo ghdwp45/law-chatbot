@@ -39,7 +39,7 @@ export async function POST(req) {
 - 해설 섹션에는 설명만 (원문 인용은 짧게 "제X조"로만 참조)
 - MCP 도구로 실제 데이터 조회 필수
 - 한국어로만 답변`,
-      messages,
+      messages: messages.slice(-4),
       mcp_servers: [
         {
           type: "url",
