@@ -36,6 +36,8 @@ async function extractLawNames(question, apiKey) {
 부가세법 → 부가가치세법
 개인정보보호법 → 개인정보 보호법
 
+중요: 질문이 해설, 설명, 검색 등 어떤 형태이든 반드시 관련 법령명만 JSON으로 반환하세요. 거부하거나 다른 텍스트를 출력하지 마세요.
+
 형식: {"laws": ["법령명1", "법령명2"]}
 JSON 외 다른 텍스트 금지.`,
         messages: [{ role: 'user', content: question }],
