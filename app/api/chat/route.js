@@ -162,7 +162,7 @@ ${!hasLawData ? '중요: 이번 답변은 법제처 API 조회 실패로 전부 
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-5',
-      max_tokens: 4000,
+      max_tokens: 8000,
       stream: true,
       system: systemPrompt,
       messages: messages.slice(-4).map(({ role, content }) => ({ role, content })),
