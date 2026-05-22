@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from "react";
 
 const EXAMPLES = [
   { label: "📋 원문 조회", q: "근로기준법 제55조 제2항 원문 찾아줘" },
-  { label: "💡 쉬운 해설", q: "주식회사 등의 외부감사에 관한 법률 쉽게 해설해줘" },
+  { label: "💡 쉬운 해설", q: "감사인 독립성이 뭔지 쉽게 설명해줘" },
   { label: "🔍 법령 검색", q: "의제매입세액 공제와 관련된 법령을 찾아줘" },
   { label: "⚖️ 판례 검색", q: "계약 해지 손해배상 관련 판례 찾아줘" },
 ];
