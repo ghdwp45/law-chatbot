@@ -62,6 +62,7 @@ export async function POST(req) {
 
   // 1단계: Claude Haiku로 법령명 추출
   const lawNames = await extractLawNames(lastUserMsg, process.env.ANTHROPIC_API_KEY);
+  console.log('[DEBUG] 추출된 법령명:', JSON.stringify(lawNames));
   const keywords = lastUserMsg.slice(0, 20);
 
   // 2단계: Lambda(서울)로 법제처 API 조회
