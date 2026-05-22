@@ -8,6 +8,13 @@ const EXAMPLES = [
   { label: "⚖️ 판례 검색", q: "계약 해지 손해배상 관련 판례 찾아줘" },
 ];
 
+const TAG_GUIDE = [
+  { icon: "📋", label: "법령원문", desc: "법제처 원문 직접 인용" },
+  { icon: "⚖️", label: "판례/해석례", desc: "법제처 판례·해석례 데이터 기반" },
+  { icon: "💡", label: "AI 해설", desc: "원문 데이터를 바탕으로 한 AI 해석" },
+  { icon: "⚠️", label: "AI 추정", desc: "원문 없이 AI 학습 데이터만 사용 (참고용으로만 활용, 법제처 원문 확인 권장)" },
+];
+
 const getLawSearchUrl = (lawName) =>
   `https://www.law.go.kr/lsSc.do?section=&menuId=1&subMenuId=15&tabMenuId=81&eventGubun=060101&query=${encodeURIComponent(lawName)}`;
 
@@ -20,7 +27,7 @@ export default function Home() {
   const chatRef = useRef(null);
   const textareaRef = useRef(null);
   const linkRefs = useRef({});
-  const readerRef = useRef(null); // 스트림 중단용
+  const readerRef = useRef(null);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -65,7 +72,6 @@ export default function Home() {
       .replace(/\n/g, "<br/>");
   };
 
-  // 답변 중단
   const stopGeneration = () => {
     if (readerRef.current) {
       readerRef.current.cancel();
@@ -85,6 +91,9 @@ export default function Home() {
     setMessages(newMessages);
     setLoading(true);
 
+    // 빈 assistant 메시지 미리 추가
+    setMessages(prev => [...prev, { role: "assistant", content: "" }]);
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -94,15 +103,14 @@ export default function Home() {
 
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error || "오류 발생");
+        const isOverloaded = err.error?.toLowerCase().includes("overload");
+        throw new Error(isOverloaded ? "OVERLOADED" : (err.error || "오류 발생"));
       }
 
       const reader = res.body.getReader();
       readerRef.current = reader;
       const decoder = new TextDecoder();
       let fullText = "";
-
-      setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -146,11 +154,7 @@ export default function Home() {
 
       setMessages(prev => {
         const updated = [...prev];
-        if (updated[updated.length - 1]?.role === "assistant") {
-          updated[updated.length - 1] = { role: "assistant", content: errMsg };
-        } else {
-          updated.push({ role: "assistant", content: errMsg });
-        }
+        updated[updated.length - 1] = { role: "assistant", content: errMsg };
         return updated;
       });
     } finally {
@@ -212,6 +216,17 @@ export default function Home() {
                     </button>
                   ))}
                 </div>
+                {/* 태그 안내 */}
+                <div style={s.tagGuide}>
+                  <div style={s.tagGuideTitle}>답변에 표시되는 출처 태그 안내</div>
+                  {TAG_GUIDE.map((t) => (
+                    <div key={t.label} style={s.tagGuideRow}>
+                      <span style={s.tagGuideIcon}>{t.icon}</span>
+                      <span style={s.tagGuideLabel}>{t.label}</span>
+                      <span style={s.tagGuideDesc}>— {t.desc}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -253,7 +268,11 @@ export default function Home() {
                 <button style={s.sendBtn} onClick={() => send()}>▶</button>
               )}
             </div>
-            <div style={s.hint}>Enter 전송 · Shift+Enter 줄바꿈 · 답변 생성 중 ■ 버튼으로 중단 가능</div>
+            <div style={s.hint}>
+              Enter 전송 · Shift+Enter 줄바꿈 · 답변 생성 중 ■ 버튼으로 중단
+              <span style={s.hintDivider}>│</span>
+              📋 법령원문 · 💡 AI해설(원문 기반) · ⚠️ AI추정(원문 없음) · ⚖️ 판례/해석례
+            </div>
           </div>
         </div>
 
@@ -358,6 +377,12 @@ const s = {
   examples:{display:"flex",flexDirection:"column",gap:7,maxWidth:400,margin:"0 auto"},
   exBtn:{background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:8,padding:"9px 14px",fontSize:12,color:"#1a1208",cursor:"pointer",textAlign:"left",fontFamily:"'Noto Sans KR',sans-serif",lineHeight:1.5},
   exLabel:{fontSize:10,fontWeight:700,color:"#b8922a",letterSpacing:0.5,display:"block",marginBottom:2},
+  tagGuide:{maxWidth:400,margin:"16px auto 0",padding:"12px 16px",background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:8,textAlign:"left"},
+  tagGuideTitle:{fontSize:11,fontWeight:700,color:"#1a1208",marginBottom:8,letterSpacing:0.3},
+  tagGuideRow:{display:"flex",alignItems:"flex-start",gap:6,marginBottom:5,fontSize:11,lineHeight:1.5},
+  tagGuideIcon:{flexShrink:0,width:18},
+  tagGuideLabel:{fontWeight:700,color:"#1a1208",flexShrink:0,width:72},
+  tagGuideDesc:{color:"#7a6e60"},
   msgRow:{display:"flex",gap:8,alignItems:"flex-start"},
   avatarAi:{width:30,height:30,background:"#1a1208",color:"#f5f0e8",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Serif KR',serif",fontSize:11,fontWeight:700,flexShrink:0},
   avatarUser:{width:30,height:30,background:"#b8922a",color:"white",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0},
@@ -370,7 +395,8 @@ const s = {
   textarea:{flex:1,border:"none",outline:"none",background:"transparent",fontFamily:"'Noto Sans KR',sans-serif",fontSize:13,color:"#1a1208",resize:"none",maxHeight:120,minHeight:22,lineHeight:1.6},
   sendBtn:{width:34,height:34,background:"#1a1208",border:"none",borderRadius:7,cursor:"pointer",color:"#f5f0e8",fontSize:13,flexShrink:0},
   stopBtn:{width:34,height:34,background:"#c0392b",border:"none",borderRadius:7,cursor:"pointer",color:"white",fontSize:13,flexShrink:0},
-  hint:{fontSize:10,color:"#7a6e60",marginTop:5,textAlign:"center"},
+  hint:{fontSize:10,color:"#7a6e60",marginTop:5,textAlign:"center",lineHeight:1.8},
+  hintDivider:{margin:"0 6px",color:"#d4c9b0"},
   rightPane:{display:"flex",flexDirection:"column",flex:"0 0 50%",overflow:"hidden",background:"#fdfaf4"},
   rightHeader:{display:"flex",alignItems:"center",gap:8,padding:"14px 18px",borderBottom:"1px solid #d4c9b0",background:"#f5f0e8",flexShrink:0},
   rightHeaderIcon:{fontSize:16},
