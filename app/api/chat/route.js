@@ -3,48 +3,35 @@ export const maxDuration = 300;
 const LAW_API_KEY = "hongjeyeon";
 const LAW_API_BASE = "http://www.law.go.kr/DRF";
 
-const LAW_ALIASES = {
-  "외부감사법": "주식회사 등의 외부감사에 관한 법률",
-  "공정거래법": "독점규제 및 공정거래에 관한 법률",
-  "하도급법": "하도급거래 공정화에 관한 법률",
-  "개인정보보호법": "개인정보 보호법",
-  "전자상거래법": "전자상거래 등에서의 소비자보호에 관한 법률",
-  "표시광고법": "표시·광고의 공정화에 관한 법률",
-  "가맹사업법": "가맹사업거래의 공정화에 관한 법률",
-  "자본시장법": "자본시장과 금융투자업에 관한 법률",
-  "금융소비자보호법": "금융소비자 보호에 관한 법률",
-  "화관법": "화학물질관리법",
-  "산안법": "산업안전보건법",
-  "중대재해법": "중대재해 처벌 등에 관한 법률",
-  "파견법": "파견근로자보호 등에 관한 법률",
-  "기간제법": "기간제 및 단시간근로자 보호 등에 관한 법률",
-  "노조법": "노동조합 및 노동관계조정법",
-  "퇴직급여법": "근로자퇴직급여 보장법",
-  "남녀고용평등법": "남녀고용평등과 일·가정 양립 지원에 관한 법률",
-  "대규모유통업법": "대규모유통업에서의 거래 공정화에 관한 법률",
-};
-
-function normalizeLawName(query) {
-  for (const [alias, full] of Object.entries(LAW_ALIASES)) {
-    if (query.includes(alias)) return full;
-  }
-  return query;
+async function extractLawNames(question, apiKey) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5',
+      max_tokens: 200,
+      system: '주어진 질문에서 관련 한국 법령명을 추출하여 JSON으로만 응답하세요. 약칭은 정식명칭으로 변환하세요. 형식: {"laws": ["법령명1", "법령명2"]} 최대 3개. JSON 외 다른 텍스트 금지.',
+      messages: [{ role: 'user', content: question }],
+    }),
+  });
+  const data = await res.json();
+  const text = data.content?.[0]?.text || '{"laws":[]}';
+  try {
+    const clean = text.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean).laws || [];
+  } catch { return []; }
 }
 
 async function searchLaw(query) {
   try {
-    const normalized = normalizeLawName(query);
-    const url = `${LAW_API_BASE}/lawSearch.do?OC=${LAW_API_KEY}&target=law&type=JSON&query=${encodeURIComponent(normalized)}&display=3&sort=efdate`;
+    const url = `${LAW_API_BASE}/lawSearch.do?OC=${LAW_API_KEY}&target=law&type=JSON&query=${encodeURIComponent(query)}&display=3&sort=efdate`;
     const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const data = await res.json();
-    const results = data.LawSearch?.law || [];
-    if (results.length === 0 && normalized !== query) {
-      const url2 = `${LAW_API_BASE}/lawSearch.do?OC=${LAW_API_KEY}&target=law&type=JSON&query=${encodeURIComponent(query)}&display=3&sort=efdate`;
-      const res2 = await fetch(url2, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-      const data2 = await res2.json();
-      return data2.LawSearch?.law || [];
-    }
-    return results;
+    return data.LawSearch?.law || [];
   } catch { return []; }
 }
 
@@ -114,22 +101,34 @@ function formatLawText(lawDetail) {
 export async function POST(req) {
   const { messages } = await req.json();
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
-  const keywords = lastUserMsg.replace(/[?!？！]/g, '').slice(0, 20);
 
-  const [laws, precedents, interpretations, adminRules] = await Promise.all([
-    searchLaw(keywords),
-    searchPrecedent(keywords),
-    searchInterpretation(keywords),
-    searchAdminRule(keywords),
+  // 1단계: Claude Haiku로 관련 법령명 추출
+  const lawNames = await extractLawNames(lastUserMsg, process.env.ANTHROPIC_API_KEY);
+
+  // 2단계: 추출된 법령명 + 키워드로 병렬 조회
+  const searchQuery = lawNames.length > 0 ? lawNames[0] : lastUserMsg.slice(0, 20);
+  const precedentQuery = lawNames.length > 0 ? lawNames[0] : lastUserMsg.slice(0, 20);
+
+  const [lawResults, precedents, interpretations, adminRules] = await Promise.all([
+    // 법령은 추출된 법령명들 전부 검색
+    Promise.all(lawNames.length > 0
+      ? lawNames.map(n => searchLaw(n))
+      : [searchLaw(searchQuery)]
+    ).then(results => results.flat()),
+    searchPrecedent(precedentQuery),
+    searchInterpretation(searchQuery),
+    searchAdminRule(searchQuery),
   ]);
 
+  // 법령 원문 조회 (상위 2개 병렬)
   let lawTexts = '';
-  if (laws.length > 0) {
-    const topLaws = laws.slice(0, 2);
+  if (lawResults.length > 0) {
+    const topLaws = lawResults.slice(0, 2);
     const lawDetails = await Promise.all(topLaws.map(l => getLawText(l.법령ID)));
     lawTexts = lawDetails.map(formatLawText).filter(Boolean).join('\n\n');
   }
 
+  // 판례 원문 조회 (상위 2개 병렬)
   let precTexts = '';
   if (precedents.length > 0) {
     const topPrecs = precedents.slice(0, 2);
@@ -148,10 +147,10 @@ export async function POST(req) {
     .map(a => `${a.행정규칙명 || ''} (${a.발령기관 || ''})`)
     .join('\n');
 
-  // 법제처 조회 성공 여부 판단
   const hasLawData = lawTexts || precTexts || expcSummary || admrulSummary;
 
   let lawContext = '';
+  if (lawNames.length > 0) lawContext += `\n[Claude가 추출한 관련 법령명: ${lawNames.join(', ')}]`;
   if (lawTexts) lawContext += `\n\n[법령 원문 - 법제처 실시간 조회]\n${lawTexts}`;
   if (precTexts) lawContext += `\n\n[관련 판례 - 법제처 실시간 조회]\n${precTexts}`;
   if (expcSummary) lawContext += `\n\n[해석례 - 법제처 실시간 조회]\n${expcSummary}`;
