@@ -3,45 +3,74 @@ export const maxDuration = 300;
 const LAMBDA_URL = "https://25l6ystkmh553nezjtj3vxuram0uqtvv.lambda-url.ap-northeast-2.on.aws";
 
 async function extractLawNames(question, apiKey) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5',
-      max_tokens: 200,
-      system: `당신은 한국 법령 전문가입니다.
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 200,
+        system: `당신은 한국 법령 전문가입니다.
 주어진 질문의 의미와 맥락을 파악하여 관련 한국 법령을 추론하고 JSON으로만 응답하세요.
 
 규칙:
-1. 질문에 법령명이 명시된 경우: 약칭·축약어를 법제처 공식 명칭으로 변환하세요.
-2. 질문에 법령명이 없는 경우: 질문의 주제와 맥락을 파악해 관련 법령을 전문가적으로 추론하세요.
-3. 법령명은 반드시 법제처 공식 전체 명칭으로 반환하세요. (예: "외감법" → "주식회사 등의 외부감사에 관한 법률")
-4. 최대 3개까지만 반환하세요. 가장 핵심적인 법령 순으로.
+1. 아래 축약어 테이블을 최우선으로 적용하세요.
+2. 테이블에 없는 약칭도 법제처 공식 명칭으로 변환하세요.
+3. 법령명이 없으면 주제와 맥락으로 관련 법령을 추론하세요.
+4. 최대 3개, 가장 핵심적인 순으로 반환하세요.
+
+[축약어 → 정식명칭]
+외감법, 외부감사법 → 주식회사 등의 외부감사에 관한 법률
+자본시장법 → 자본시장과 금융투자업에 관한 법률
+공정거래법 → 독점규제 및 공정거래에 관한 법률
+지배구조법 → 금융회사의 지배구조에 관한 법률
+상법 → 상법
+근로기준법 → 근로기준법
+소득세법 → 소득세법
+법인세법 → 법인세법
+부가세법 → 부가가치세법
+개인정보보호법 → 개인정보 보호법
 
 형식: {"laws": ["법령명1", "법령명2"]}
 JSON 외 다른 텍스트 금지.`,
-      messages: [{ role: 'user', content: question }],
-    }),
-  });
-  const data = await res.json();
-  const text = data.content?.[0]?.text || '{"laws":[]}';
-  try {
+        messages: [{ role: 'user', content: question }],
+      }),
+    });
+
+    console.log('[DEBUG] Haiku HTTP status:', res.status);
+    const data = await res.json();
+
+    if (data.error) {
+      console.error('[ERROR] Haiku API 오류:', data.error.message);
+      return [];
+    }
+
+    const text = data.content?.[0]?.text || '{"laws":[]}';
+    console.log('[DEBUG] Haiku text:', text);
+
     const clean = text.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean).laws || [];
-  } catch { return []; }
+    const parsed = JSON.parse(clean).laws || [];
+    console.log('[DEBUG] 추출된 법령명:', JSON.stringify(parsed));
+    return parsed;
+
+  } catch (e) {
+    console.error('[ERROR] extractLawNames 실패:', e.message);
+    return [];
+  }
 }
 
 export async function POST(req) {
   const { messages } = await req.json();
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
 
+  console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
+
   // 1단계: Claude Haiku로 법령명 추출
   const lawNames = await extractLawNames(lastUserMsg, process.env.ANTHROPIC_API_KEY);
-  console.log('[DEBUG] 추출된 법령명:', JSON.stringify(lawNames));
   const keywords = lastUserMsg.slice(0, 20);
 
   // 2단계: Lambda(서울)로 법제처 API 조회
@@ -54,13 +83,14 @@ export async function POST(req) {
       body: JSON.stringify({ lawNames, keywords }),
     });
     const lawData = await lambdaRes.json();
+    console.log('[DEBUG] Lambda hasData:', lawData.hasData);
     lawTexts = lawData.lawTexts || '';
     precTexts = lawData.precTexts || '';
     expcSummary = lawData.expcSummary || '';
     admrulSummary = lawData.admrulSummary || '';
     hasLawData = lawData.hasData || false;
   } catch (e) {
-    console.error('Lambda 호출 실패:', e.message);
+    console.error('[ERROR] Lambda 호출 실패:', e.message);
   }
 
   let lawContext = '';
