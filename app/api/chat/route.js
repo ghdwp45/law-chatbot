@@ -82,16 +82,21 @@ export async function POST(req) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lawNames, keywords }),
     });
-    const lawData = await lambdaRes.json();
+    const lambdaText = await lambdaRes.text();
+    console.log('[DEBUG] Lambda 원본 응답:', lambdaText.slice(0, 300));
+    const lawData = JSON.parse(lambdaText);
     console.log('[DEBUG] Lambda hasData:', lawData.hasData);
+    console.log('[DEBUG] Lambda lawTexts 길이:', (lawData.lawTexts || '').length);
     lawTexts = lawData.lawTexts || '';
     precTexts = lawData.precTexts || '';
     expcSummary = lawData.expcSummary || '';
     admrulSummary = lawData.admrulSummary || '';
-    hasLawData = lawData.hasData || false;
+    hasLawData = lawData.hasData === true;
   } catch (e) {
     console.error('[ERROR] Lambda 호출 실패:', e.message);
   }
+
+  console.log('[DEBUG] 최종 hasLawData:', hasLawData);
 
   let lawContext = '';
   if (lawNames.length > 0) lawContext += `\n[관련 법령명: ${lawNames.join(', ')}]`;
@@ -119,8 +124,6 @@ ${hasLawData
 ⚖️ [판례/해석례] ★★★ - 법제처 API 판례·해석례 데이터 기반 (신뢰도: ★★★)
 💡 [AI 해설] ★★☆ - 위 원문 데이터를 바탕으로 한 AI의 해석 및 실무 설명 (신뢰도: ★★☆)
 ⚠️ [AI 추정] ★☆☆ - 법제처 API 조회 실패, AI 학습 데이터만 사용 (신뢰도: ★☆☆, 원문 확인 필요)
-
-${!hasLawData ? '중요: 이번 답변은 법제처 API 조회 실패로 전부 ⚠️ [AI 추정] 태그를 사용하고, 답변 마지막에 "※ 이 답변은 AI 학습 데이터 기반입니다. 정확한 원문은 법제처(law.go.kr)에서 반드시 확인하시기 바랍니다." 라고 명시하세요.' : ''}
 
 판례 인용 시 사건번호도 함께 표기하세요. 충분히 상세하게 작성하세요.
 ===해설끝===
