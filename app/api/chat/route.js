@@ -2,6 +2,7 @@ export const maxDuration = 300;
 
 const LAMBDA_URL = "https://25l6ystkmh553nezjtj3vxuram0uqtvv.lambda-url.ap-northeast-2.on.aws";
 
+// Haiku 호출 결과: { laws: [...], error: "OVERLOADED" 등 } 형태
 async function extractLawNames(question, apiKey) {
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -46,7 +47,9 @@ JSON 외 다른 텍스트 금지.`,
 
     if (data.error) {
       console.error('[ERROR] Haiku API 오류:', data.error.message);
-      return [];
+      const isOverloaded = data.error.message?.toLowerCase().includes('overload')
+        || data.error.type?.toLowerCase().includes('overload');
+      return { laws: [], error: isOverloaded ? 'OVERLOADED' : data.error.message };
     }
 
     const text = data.content?.[0]?.text || '{"laws":[]}';
@@ -55,11 +58,11 @@ JSON 외 다른 텍스트 금지.`,
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean).laws || [];
     console.log('[DEBUG] 추출된 법령명:', JSON.stringify(parsed));
-    return parsed;
+    return { laws: parsed };
 
   } catch (e) {
     console.error('[ERROR] extractLawNames 실패:', e.message);
-    return [];
+    return { laws: [], error: e.message };
   }
 }
 
@@ -70,7 +73,17 @@ export async function POST(req) {
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
 
   // 1단계: Claude Haiku로 법령명 추출
-  const lawNames = await extractLawNames(lastUserMsg, process.env.ANTHROPIC_API_KEY);
+  const haikuResult = await extractLawNames(lastUserMsg, process.env.ANTHROPIC_API_KEY);
+
+  // Overloaded면 즉시 에러 응답
+  if (haikuResult.error === 'OVERLOADED') {
+    return Response.json(
+      { error: 'Overloaded: 서버 과부하 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' },
+      { status: 529 }
+    );
+  }
+
+  const lawNames = haikuResult.laws;
   const keywords = lastUserMsg.slice(0, 20);
 
   // 2단계: Lambda(서울)로 법제처 API 조회
@@ -83,10 +96,8 @@ export async function POST(req) {
       body: JSON.stringify({ lawNames, keywords }),
     });
     const lambdaText = await lambdaRes.text();
-    console.log('[DEBUG] Lambda 원본 응답:', lambdaText.slice(0, 300));
     const lawData = JSON.parse(lambdaText);
     console.log('[DEBUG] Lambda hasData:', lawData.hasData);
-    console.log('[DEBUG] Lambda lawTexts 길이:', (lawData.lawTexts || '').length);
     lawTexts = lawData.lawTexts || '';
     precTexts = lawData.precTexts || '';
     expcSummary = lawData.expcSummary || '';
@@ -118,12 +129,18 @@ ${hasLawData
 질문에 대한 핵심 답변을 2~3줄로 먼저 요약합니다. (두괄식)
 
 ## 상세 해설
-각 내용에 반드시 아래 4가지 태그 중 하나를 붙여 출처와 신뢰도를 표시하세요:
+각 내용에 반드시 아래 4가지 태그 중 하나를 붙여 출처를 표시하세요:
 
-📋 [법령 원문] ★★★ - 법제처 API에서 가져온 조문을 그대로 인용 (신뢰도: ★★★)
-⚖️ [판례/해석례] ★★★ - 법제처 API 판례·해석례 데이터 기반 (신뢰도: ★★★)
-💡 [AI 해설] ★★☆ - 위 원문 데이터를 바탕으로 한 AI의 해석 및 실무 설명 (신뢰도: ★★☆)
-⚠️ [AI 추정] ★☆☆ - 법제처 API 조회 실패, AI 학습 데이터만 사용 (신뢰도: ★☆☆, 원문 확인 필요)
+📋 [법령 원문] - 법제처 API에서 가져온 조문을 그대로 인용
+⚖️ [판례/해석례] - 법제처 API 판례·해석례 데이터 기반
+💡 [AI 해설] - 위 원문 데이터를 바탕으로 한 AI의 해석 및 실무 설명
+⚠️ [AI 추정] - 법제처 API 조회 실패, AI 학습 데이터만 사용 (참고용, 법제처 원문 확인 권장)
+
+중요 규칙:
+- 별표(★)는 절대 사용하지 마세요. 태그 뒤에 별을 붙이지 마세요.
+- 신뢰도 표시(★★★, ★★☆, ★☆☆ 등)도 절대 사용하지 마세요.
+
+${!hasLawData ? '중요: 이번 답변은 법제처 API 조회 실패로 전부 ⚠️ [AI 추정] 태그를 사용하고, 답변 마지막에 "※ 이 답변은 AI 학습 데이터 기반입니다. 정확한 원문은 법제처(law.go.kr)에서 반드시 확인하시기 바랍니다." 라고 명시하세요.' : ''}
 
 판례 인용 시 사건번호도 함께 표기하세요. 충분히 상세하게 작성하세요.
 ===해설끝===
@@ -132,7 +149,7 @@ ${hasLawData
 법령명|조문번호|설명
 ===관련법령끝===
 
-절대 규칙: 두 섹션 모두 반드시 포함. 모든 내용에 태그 필수. 한국어로만 답변.`;
+절대 규칙: 두 섹션 모두 반드시 포함. 모든 내용에 태그 필수. 별표(★) 사용 금지. 한국어로만 답변.`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -152,7 +169,15 @@ ${hasLawData
 
   if (!response.ok) {
     const data = await response.json();
-    return Response.json({ error: data.error?.message || 'API 오류' }, { status: response.status });
+    const errMsg = data.error?.message || 'API 오류';
+    const isOverloaded = errMsg.toLowerCase().includes('overload') || response.status === 529;
+    if (isOverloaded) {
+      return Response.json(
+        { error: 'Overloaded: 서버 과부하 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' },
+        { status: 529 }
+      );
+    }
+    return Response.json({ error: errMsg }, { status: response.status });
   }
 
   const stream = new ReadableStream({
