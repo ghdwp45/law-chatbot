@@ -2,10 +2,10 @@
 import { useState, useRef, useEffect } from "react";
 
 const EXAMPLES = [
-  { label: "📋 원문 조회", q: "근로기준법 제60조 연차유급휴가 알려줘" },
-  { label: "💡 쉬운 해설", q: "퇴직금 지급 기준이 어떻게 되는지 쉽게 설명해줘" },
-  { label: "🔍 법령 검색", q: "부가가치세법에서 면세 대상은 뭐야?" },
-  { label: "⚠️ 처벌 규정", q: "공정거래법 위반 시 처벌 규정 알려줘" },
+  { label: "📋 원문 조회", q: "근로기준법 제55조 제2항 원문 찾아줘" },
+  { label: "💡 쉬운 해설", q: "주식회사 등의 외부감사에 관한 법률 쉽게 해설해줘" },
+  { label: "🔍 법령 검색", q: "의제매입세액 공제와 관련된 법령을 찾아줘" },
+  { label: "⚖️ 판례 검색", q: "계약 해지 손해배상 관련 판례 찾아줘" },
 ];
 
 const getLawSearchUrl = (lawName) =>
@@ -20,6 +20,7 @@ export default function Home() {
   const chatRef = useRef(null);
   const textareaRef = useRef(null);
   const linkRefs = useRef({});
+  const readerRef = useRef(null); // 스트림 중단용
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -64,6 +65,15 @@ export default function Home() {
       .replace(/\n/g, "<br/>");
   };
 
+  // 답변 중단
+  const stopGeneration = () => {
+    if (readerRef.current) {
+      readerRef.current.cancel();
+      readerRef.current = null;
+    }
+    setLoading(false);
+  };
+
   const send = async (text) => {
     const userText = text || input.trim();
     if (!userText || loading) return;
@@ -88,6 +98,7 @@ export default function Home() {
       }
 
       const reader = res.body.getReader();
+      readerRef.current = reader;
       const decoder = new TextDecoder();
       let fullText = "";
 
@@ -118,21 +129,32 @@ export default function Home() {
               });
               if (links.length > 0) setLawLinks(links);
             }
-            if (parsed.error) throw new Error(parsed.error);
-          } catch {}
+            if (parsed.error) {
+              const isOverloaded = parsed.error.toLowerCase().includes("overload");
+              throw new Error(isOverloaded ? "OVERLOADED" : parsed.error);
+            }
+          } catch (innerE) {
+            if (innerE.message === "OVERLOADED") throw innerE;
+          }
         }
       }
     } catch (e) {
+      const isOverloaded = e.message === "OVERLOADED" || e.message?.toLowerCase().includes("overload");
+      const errMsg = isOverloaded
+        ? "⚠️ 서버 과부하 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+        : `❌ ${e.message}`;
+
       setMessages(prev => {
         const updated = [...prev];
         if (updated[updated.length - 1]?.role === "assistant") {
-          updated[updated.length - 1] = { role: "assistant", content: `❌ ${e.message}` };
+          updated[updated.length - 1] = { role: "assistant", content: errMsg };
         } else {
-          updated.push({ role: "assistant", content: `❌ ${e.message}` });
+          updated.push({ role: "assistant", content: errMsg });
         }
         return updated;
       });
     } finally {
+      readerRef.current = null;
       setLoading(false);
     }
   };
@@ -225,9 +247,13 @@ export default function Home() {
                 placeholder="법령명, 조문번호, 또는 궁금한 내용을 입력하세요..."
                 rows={1}
               />
-              <button style={{...s.sendBtn, opacity: loading ? 0.4 : 1}} onClick={() => send()} disabled={loading}>▶</button>
+              {loading ? (
+                <button style={s.stopBtn} onClick={stopGeneration}>■</button>
+              ) : (
+                <button style={s.sendBtn} onClick={() => send()}>▶</button>
+              )}
             </div>
-            <div style={s.hint}>Enter 전송 · Shift+Enter 줄바꿈 · 답변의 <span style={{color:"#c0392b",fontWeight:600}}>조문번호</span> 클릭 시 오른쪽 하이라이트</div>
+            <div style={s.hint}>Enter 전송 · Shift+Enter 줄바꿈 · 답변 생성 중 ■ 버튼으로 중단 가능</div>
           </div>
         </div>
 
@@ -343,6 +369,7 @@ const s = {
   inputRow:{display:"flex",gap:8,alignItems:"flex-end",background:"#fdfaf4",border:"1.5px solid #d4c9b0",borderRadius:10,padding:"7px 7px 7px 12px"},
   textarea:{flex:1,border:"none",outline:"none",background:"transparent",fontFamily:"'Noto Sans KR',sans-serif",fontSize:13,color:"#1a1208",resize:"none",maxHeight:120,minHeight:22,lineHeight:1.6},
   sendBtn:{width:34,height:34,background:"#1a1208",border:"none",borderRadius:7,cursor:"pointer",color:"#f5f0e8",fontSize:13,flexShrink:0},
+  stopBtn:{width:34,height:34,background:"#c0392b",border:"none",borderRadius:7,cursor:"pointer",color:"white",fontSize:13,flexShrink:0},
   hint:{fontSize:10,color:"#7a6e60",marginTop:5,textAlign:"center"},
   rightPane:{display:"flex",flexDirection:"column",flex:"0 0 50%",overflow:"hidden",background:"#fdfaf4"},
   rightHeader:{display:"flex",alignItems:"center",gap:8,padding:"14px 18px",borderBottom:"1px solid #d4c9b0",background:"#f5f0e8",flexShrink:0},
