@@ -5,7 +5,7 @@ const EXAMPLES = [
   { label: "📋 원문 조회", q: "근로기준법 제55조 제2항 원문 찾아줘" },
   { label: "💡 쉬운 해설", q: "감사인 독립성이 뭔지 쉽게 설명해줘" },
   { label: "🔍 법령 검색", q: "의제매입세액 공제와 관련된 법령을 찾아줘" },
-  { label: "⚖️ 판례 검색", q: "계약 해지 손해배상 관련 판례 찾아줘" },
+  
 ];
 
 const TAG_GUIDE = [
@@ -372,14 +372,14 @@ const s = {
   chatArea:{flex:1,overflowY:"auto",padding:"20px 16px",display:"flex",flexDirection:"column",gap:14},
   welcome:{textAlign:"center",padding:"28px 16px"},
   welcomeIcon:{fontSize:36,marginBottom:10},
-  welcomeTitle:{fontFamily:"'Noto Serif KR',serif",fontSize:18,fontWeight:700,color:"#1a1208",marginBottom:6},
-  welcomeDesc:{fontSize:12,color:"#7a6e60",lineHeight:1.7,marginBottom:16},
+  welcomeTitle:{fontFamily:"'Noto Serif KR',serif",fontSize:22,fontWeight:700,color:"#1a1208",marginBottom:6},
+  welcomeDesc:{fontSize:14,color:"#7a6e60",lineHeight:1.7,marginBottom:16},
   examples:{display:"flex",flexDirection:"column",gap:7,maxWidth:400,margin:"0 auto"},
-  exBtn:{background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:8,padding:"9px 14px",fontSize:12,color:"#1a1208",cursor:"pointer",textAlign:"left",fontFamily:"'Noto Sans KR',sans-serif",lineHeight:1.5},
-  exLabel:{fontSize:10,fontWeight:700,color:"#b8922a",letterSpacing:0.5,display:"block",marginBottom:2},
+  exBtn:{background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:8,padding:"11px 16px",fontSize:14,color:"#1a1208",cursor:"pointer",textAlign:"left",fontFamily:"'Noto Sans KR',sans-serif",lineHeight:1.5},
+  exLabel:{fontSize:12,fontWeight:700,color:"#b8922a",letterSpacing:0.5,display:"block",marginBottom:2},
   tagGuide:{maxWidth:400,margin:"16px auto 0",padding:"12px 16px",background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:8,textAlign:"left"},
-  tagGuideTitle:{fontSize:11,fontWeight:700,color:"#1a1208",marginBottom:8,letterSpacing:0.3},
-  tagGuideRow:{display:"flex",alignItems:"flex-start",gap:6,marginBottom:5,fontSize:11,lineHeight:1.5},
+  tagGuideTitle:{fontSize:13,fontWeight:700,color:"#1a1208",marginBottom:8,letterSpacing:0.3},
+  tagGuideRow:{display:"flex",alignItems:"flex-start",gap:6,marginBottom:6,fontSize:13,lineHeight:1.5},
   tagGuideIcon:{flexShrink:0,width:18},
   tagGuideLabel:{fontWeight:700,color:"#1a1208",flexShrink:0,width:72},
   tagGuideDesc:{color:"#7a6e60"},
@@ -395,7 +395,7 @@ const s = {
   textarea:{flex:1,border:"none",outline:"none",background:"transparent",fontFamily:"'Noto Sans KR',sans-serif",fontSize:13,color:"#1a1208",resize:"none",maxHeight:120,minHeight:22,lineHeight:1.6},
   sendBtn:{width:34,height:34,background:"#1a1208",border:"none",borderRadius:7,cursor:"pointer",color:"#f5f0e8",fontSize:13,flexShrink:0},
   stopBtn:{width:34,height:34,background:"#c0392b",border:"none",borderRadius:7,cursor:"pointer",color:"white",fontSize:13,flexShrink:0},
-  hint:{fontSize:10,color:"#7a6e60",marginTop:5,textAlign:"center",lineHeight:1.8},
+  hint:{fontSize:12,color:"#7a6e60",marginTop:5,textAlign:"center",lineHeight:1.8},
   hintDivider:{margin:"0 6px",color:"#d4c9b0"},
   rightPane:{display:"flex",flexDirection:"column",flex:"0 0 50%",overflow:"hidden",background:"#fdfaf4"},
   rightHeader:{display:"flex",alignItems:"center",gap:8,padding:"14px 18px",borderBottom:"1px solid #d4c9b0",background:"#f5f0e8",flexShrink:0},
