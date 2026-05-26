@@ -38,7 +38,8 @@ async function extractLawNames(question, apiKey) {
 
 중요: 질문이 해설, 설명, 검색 등 어떤 형태이든 반드시 관련 법령명만 JSON으로 반환하세요. 거부하거나 다른 텍스트를 출력하지 마세요.
 
-형식: {"laws": ["법령명1", "법령명2"]}
+형식: {"laws": ["법령명1", "법령명2"], "articleNos": ["55", "60"]}
+articleNos는 질문에 특정 조문번호가 언급된 경우만 포함하고, 없으면 빈 배열 []로 반환하세요.
 JSON 외 다른 텍스트 금지.`,
         messages: [{ role: 'user', content: question }],
       }),
@@ -58,9 +59,11 @@ JSON 외 다른 텍스트 금지.`,
     console.log('[DEBUG] Haiku text:', text);
 
     const clean = text.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean).laws || [];
+    const parsedData = JSON.parse(clean);
+    const parsed = parsedData.laws || [];
+    const articleNos = parsedData.articleNos || [];
     console.log('[DEBUG] 추출된 법령명:', JSON.stringify(parsed));
-    return { laws: parsed };
+    return { laws: parsed, articleNos };
 
   } catch (e) {
     console.error('[ERROR] extractLawNames 실패:', e.message);
@@ -95,7 +98,7 @@ export async function POST(req) {
     const lambdaRes = await fetch(LAMBDA_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lawNames, keywords }),
+      body: JSON.stringify({ lawNames, keywords, articleNos: haikuResult.articleNos || [] }),
     });
     const lambdaText = await lambdaRes.text();
     const lawData = JSON.parse(lambdaText);
