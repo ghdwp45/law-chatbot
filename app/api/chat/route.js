@@ -87,7 +87,7 @@ export async function POST(req) {
   }
 
   const lawNames = haikuResult.laws;
-  const keywords = lastUserMsg.slice(0, 20);
+  const keywords = lastUserMsg.slice(0, 100);
 
   // 2단계: Lambda(서울)로 법제처 API 조회
   let lawTexts = '', precTexts = '', expcSummary = '', admrulSummary = '';
