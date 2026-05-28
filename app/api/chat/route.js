@@ -23,12 +23,6 @@ async function extractLawNames(question, apiKey) {
 2. 테이블에 없는 약칭도 법제처 공식 명칭으로 변환하세요.
 3. 법령명이 없으면 주제와 맥락으로 관련 법령을 추론하세요.
 4. 최대 3개, 가장 핵심적인 순으로 반환하세요.
-5. articleNos: 질문에 특정 조문번호가 명시된 경우 해당 번호를 반환하세요.
-   명시되지 않은 경우에도, 질문 주제와 가장 직접적으로 관련된 핵심 조문번호를 법령별로 1~2개 추론하세요.
-   예: "월합계세금계산서 발급" → 부가가치세법 제32조
-   예: "감사위원회 설치" → 상법 제415조의2
-   예: "연차휴가" → 근로기준법 제60조
-   추론이 불확실하면 빈 배열 []로 반환하세요.
 
 [축약어 → 정식명칭]
 외감법, 외부감사법 → 주식회사 등의 외부감사에 관한 법률
@@ -44,7 +38,7 @@ async function extractLawNames(question, apiKey) {
 
 중요: 질문이 해설, 설명, 검색 등 어떤 형태이든 반드시 관련 법령명만 JSON으로 반환하세요. 거부하거나 다른 텍스트를 출력하지 마세요.
 
-형식: {"laws": ["법령명1", "법령명2"], "articleNos": ["32", "34"]}
+형식: {"laws": ["법령명1", "법령명2"]}
 JSON 외 다른 텍스트 금지.`,
         messages: [{ role: 'user', content: question }],
       }),
@@ -66,9 +60,8 @@ JSON 외 다른 텍스트 금지.`,
     const clean = text.replace(/```json|```/g, '').trim();
     const parsedData = JSON.parse(clean);
     const parsed = parsedData.laws || [];
-    const articleNos = parsedData.articleNos || [];
     console.log('[DEBUG] 추출된 법령명:', JSON.stringify(parsed));
-    return { laws: parsed, articleNos };
+    return { laws: parsed };
 
   } catch (e) {
     console.error('[ERROR] extractLawNames 실패:', e.message);
@@ -103,7 +96,7 @@ export async function POST(req) {
     const lambdaRes = await fetch(LAMBDA_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lawNames, keywords, articleNos: haikuResult.articleNos || [] }),
+      body: JSON.stringify({ lawNames, keywords }),
     });
     const lambdaText = await lambdaRes.text();
     const lawData = JSON.parse(lambdaText);
