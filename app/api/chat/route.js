@@ -93,7 +93,7 @@ export async function POST(req) {
   const keywords = lastUserMsg.slice(0, 100);
 
   // 2단계: Lambda(서울)로 법제처 API 조회
-  let lawTexts = '', precTexts = '', expcSummary = '', taxTribunalTexts = '', admrulSummary = '';
+  let lawTexts = '', precTexts = '', expcSummary = '', ministryInterpTexts = '', taxTribunalTexts = '', admrulSummary = '';
   let hasLawData = false;
   try {
     const lambdaRes = await fetch(LAMBDA_URL, {
@@ -107,6 +107,7 @@ export async function POST(req) {
     lawTexts = lawData.lawTexts || '';
     precTexts = lawData.precTexts || '';
     expcSummary = lawData.expcSummary || '';
+    ministryInterpTexts = lawData.ministryInterpTexts || '';
     taxTribunalTexts = lawData.taxTribunalTexts || '';
     admrulSummary = lawData.admrulSummary || '';
     hasLawData = lawData.hasData === true;
@@ -121,6 +122,7 @@ export async function POST(req) {
   if (lawTexts) lawContext += `\n\n[법령 원문 - 법제처 실시간 조회]\n${lawTexts}`;
   if (precTexts) lawContext += `\n\n[관련 판례 - 법제처 실시간 조회]\n${precTexts}`;
   if (expcSummary) lawContext += `\n\n[해석례 - 법제처 실시간 조회]\n${expcSummary}`;
+  if (ministryInterpTexts) lawContext += `\n\n[기획재정부/고용노동부 법령해석례 - 법제처 실시간 조회]\n${ministryInterpTexts}`;
   if (taxTribunalTexts) lawContext += `\n\n[조세심판원 결정례 - 법제처 실시간 조회]\n${taxTribunalTexts}`;
 
   if (admrulSummary) lawContext += `\n\n[행정규칙 - 법제처 실시간 조회]\n${admrulSummary}`;
