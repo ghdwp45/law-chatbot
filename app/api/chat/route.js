@@ -90,7 +90,7 @@ export async function POST(req) {
   const keywords = lastUserMsg.slice(0, 100);
 
   // 2단계: Lambda(서울)로 법제처 API 조회
-  let lawTexts = '', precTexts = '', expcSummary = '', admrulSummary = '';
+  let lawTexts = '', precTexts = '', expcSummary = '', taxTribunalTexts = '', admrulSummary = '';
   let hasLawData = false;
   try {
     const lambdaRes = await fetch(LAMBDA_URL, {
@@ -104,6 +104,7 @@ export async function POST(req) {
     lawTexts = lawData.lawTexts || '';
     precTexts = lawData.precTexts || '';
     expcSummary = lawData.expcSummary || '';
+    taxTribunalTexts = lawData.taxTribunalTexts || '';
     admrulSummary = lawData.admrulSummary || '';
     hasLawData = lawData.hasData === true;
   } catch (e) {
@@ -117,6 +118,8 @@ export async function POST(req) {
   if (lawTexts) lawContext += `\n\n[법령 원문 - 법제처 실시간 조회]\n${lawTexts}`;
   if (precTexts) lawContext += `\n\n[관련 판례 - 법제처 실시간 조회]\n${precTexts}`;
   if (expcSummary) lawContext += `\n\n[해석례 - 법제처 실시간 조회]\n${expcSummary}`;
+  if (taxTribunalTexts) lawContext += `\n\n[조세심판원 결정례 - 법제처 실시간 조회]\n${taxTribunalTexts}`;
+
   if (admrulSummary) lawContext += `\n\n[행정규칙 - 법제처 실시간 조회]\n${admrulSummary}`;
 
   const systemPrompt = `당신은 대한민국 국가법령정보센터 API 데이터를 기반으로 사용자의 법률 질의에 답변하는 수석 전문 법률 AI 어시스턴트입니다.
