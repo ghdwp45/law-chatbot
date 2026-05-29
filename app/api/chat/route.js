@@ -38,7 +38,8 @@ async function extractLawNames(question, apiKey) {
 
 중요: 질문이 해설, 설명, 검색 등 어떤 형태이든 반드시 관련 법령명만 JSON으로 반환하세요. 거부하거나 다른 텍스트를 출력하지 마세요.
 
-형식: {"laws": ["법령명1", "법령명2"]}
+형식: {"laws": ["법령명1", "법령명2"], "taxKeyword": "조세심판원 검색용 핵심 키워드 1~3단어"}
+taxKeyword: 질문의 핵심 세무/법률 주제를 짧게 추출. 예: "월합계세금계산서", "부당해고 구제신청", "연차휴가 수당"
 JSON 외 다른 텍스트 금지.`,
         messages: [{ role: 'user', content: question }],
       }),
@@ -60,8 +61,10 @@ JSON 외 다른 텍스트 금지.`,
     const clean = text.replace(/```json|```/g, '').trim();
     const parsedData = JSON.parse(clean);
     const parsed = parsedData.laws || [];
+    const taxKeyword = parsedData.taxKeyword || '';
     console.log('[DEBUG] 추출된 법령명:', JSON.stringify(parsed));
-    return { laws: parsed };
+    console.log('[DEBUG] 조세심판원 키워드:', taxKeyword);
+    return { laws: parsed, taxKeyword };
 
   } catch (e) {
     console.error('[ERROR] extractLawNames 실패:', e.message);
@@ -96,7 +99,7 @@ export async function POST(req) {
     const lambdaRes = await fetch(LAMBDA_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lawNames, keywords }),
+      body: JSON.stringify({ lawNames, keywords, taxKeyword: haikuResult.taxKeyword || '' }),
     });
     const lambdaText = await lambdaRes.text();
     const lawData = JSON.parse(lambdaText);
