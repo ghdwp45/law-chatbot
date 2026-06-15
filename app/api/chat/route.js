@@ -6,9 +6,10 @@ const MCP_URL = `https://korean-law-mcp.fly.dev/mcp?oc=${process.env.LAW_OC}`;
 // 답변 모델: 비용 우선이면 sonnet, 품질 우선이면 opus로 교체
 const ANSWER_MODEL = 'claude-sonnet-4-6';
 
-// "진전이 없는 채로" 이 시간이 지나면 중단(서버 멈춤 감지). 안전망 120초.
-// 답변이 흘러나오는 중엔 계속 리셋되므로, 긴 답변은 절대 잘리지 않음.
+// idle: 스트림에서 바이트(ping 포함)가 올 때마다 리셋. 진짜 연결이 죽어 완전 무음일 때만 발동.
 const IDLE_TIMEOUT_MS = 120000;
+// total: 살아있어도(ping만 오고 도구가 끝없이 멈춰도) Vercel 300초 강제종료 전에 깔끔히 종료.
+const TOTAL_TIMEOUT_MS = 250000;
 
 const systemPrompt = `당신은 대한민국 법률 전문가 AI 어시스턴트입니다.
 korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례·행정규칙 등)를 조회한 뒤,
@@ -59,13 +60,19 @@ export async function POST(req) {
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
 
-  // idle 타임아웃: 진전(글자/도구호출)이 있을 때마다 리셋. 멈춰야만 abort.
+  // ── 타임아웃 2종 ──────────────────────────────────────────────
   const abort = new AbortController();
-  let idleTimer = setTimeout(() => abort.abort(), IDLE_TIMEOUT_MS);
+  let abortReason = null; // 'IDLE' | 'TOTAL' | null  (signal.reason보다 portable)
+
+  let idleTimer;
   const resetIdle = () => {
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => abort.abort(), IDLE_TIMEOUT_MS);
+    idleTimer = setTimeout(() => { abortReason = 'IDLE'; abort.abort(); }, IDLE_TIMEOUT_MS);
   };
+  const totalTimer = setTimeout(() => { abortReason = 'TOTAL'; abort.abort(); }, TOTAL_TIMEOUT_MS);
+  const clearTimers = () => { clearTimeout(idleTimer); clearTimeout(totalTimer); };
+  resetIdle(); // 시작
+  // ─────────────────────────────────────────────────────────────
 
   let response;
   try {
@@ -93,13 +100,13 @@ export async function POST(req) {
       }),
     });
   } catch (e) {
-    clearTimeout(idleTimer);
+    clearTimers();
     console.error('[ERROR] Claude API 호출 실패:', e.message);
     return Response.json({ error: 'API 호출 실패: ' + e.message }, { status: 502 });
   }
 
   if (!response.ok) {
-    clearTimeout(idleTimer);
+    clearTimers();
     const data = await response.json().catch(() => ({}));
     const errMsg = data.error?.message || 'API 오류';
     const isOverloaded = errMsg.toLowerCase().includes('overload') || response.status === 529;
@@ -123,6 +130,10 @@ export async function POST(req) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          // ★ 핵심 수정: 어떤 바이트든(ping·도구입력·결과 등) 오면 "서버 살아있음" → idle 리셋
+          //    도구가 오래 조회 중이어도 ping이 흐르는 한 절대 헛발동하지 않음
+          resetIdle();
+
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
@@ -133,7 +144,7 @@ export async function POST(req) {
             try {
               const ev = JSON.parse(data);
 
-              // (1) 스트림 중간 에러 → 프론트로 전달 + 로그 (조용히 삼켜지는 것 방지)
+              // 스트림 중간 에러 → 프론트로 전달 + 로그
               if (ev.type === 'error' || ev.error) {
                 console.error('[ERROR] 스트림 이벤트 에러:', JSON.stringify(ev));
                 controller.enqueue(enc.encode(
@@ -142,25 +153,23 @@ export async function POST(req) {
                 continue;
               }
 
-              // (2) MCP 도구 호출 시작 → 진행상태 표시 + idle 타이머 리셋
+              // MCP 도구 호출 시작 → 진행상태 표시
               if (ev.type === 'content_block_start' && ev.content_block?.type === 'mcp_tool_use') {
-                resetIdle();
                 console.log('[DEBUG] MCP 도구 호출:', ev.content_block.name);
                 controller.enqueue(enc.encode(
                   'data: ' + JSON.stringify({ tool: ev.content_block.name }) + '\n\n'
                 ));
               }
 
-              // (3) 답변 텍스트 스트리밍 → 글자 올 때마다 idle 타이머 리셋 (긴 답변 안 잘림)
+              // 답변 텍스트 스트리밍
               if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-                resetIdle();
                 fullText += ev.delta.text;
                 controller.enqueue(enc.encode(
                   'data: ' + JSON.stringify({ text: ev.delta.text }) + '\n\n'
                 ));
               }
 
-              // (4) 종료 사유 확인 → max_tokens면 잘림 신호 전송
+              // 종료 사유 → max_tokens면 잘림 신호
               if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
                 console.log('[DEBUG] stop_reason:', ev.delta.stop_reason);
                 if (ev.delta.stop_reason === 'max_tokens') {
@@ -176,16 +185,21 @@ export async function POST(req) {
           'data: ' + JSON.stringify({ done: true, full: fullText }) + '\n\n'
         ));
       } catch (e) {
-        // AbortError = idle 타임아웃(서버 멈춤), 그 외 = 스트림 처리 오류
-        const msg = e.name === 'AbortError'
-          ? '법령 서버 응답이 멈춰 중단했습니다. 잠시 후 다시 시도하거나 질문을 나눠 주세요.'
-          : e.message;
-        console.error('[ERROR] 스트림 처리:', e.name, e.message);
+        // abortReason으로 idle/total/기타 구분
+        let msg;
+        if (abortReason === 'IDLE') {
+          msg = '법령 서버 응답이 끊겨 중단했습니다(연결 무응답). 잠시 후 다시 시도해 주세요.';
+        } else if (abortReason === 'TOTAL') {
+          msg = '질문이 복잡해 처리 시간이 초과됐습니다. 질문을 나눠서 다시 시도해 주세요.';
+        } else {
+          msg = e.message;
+        }
+        console.error('[ERROR] 스트림 처리:', abortReason || e.name, e.message);
         controller.enqueue(enc.encode(
           'data: ' + JSON.stringify({ error: msg }) + '\n\n'
         ));
       } finally {
-        clearTimeout(idleTimer);
+        clearTimers();
         controller.close();
       }
     }
