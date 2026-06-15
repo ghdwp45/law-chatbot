@@ -6,9 +6,9 @@ const MCP_URL = `https://korean-law-mcp.fly.dev/mcp?oc=${process.env.LAW_OC}`;
 // 답변 모델: 비용 우선이면 sonnet, 품질 우선이면 opus로 교체
 const ANSWER_MODEL = 'claude-sonnet-4-6';
 
-// 하드 타임아웃(300초) 전에 graceful 실패시킬 시간.
-// 무거운 질문으로 MCP 서버가 멈춰도 5분 기다리지 않고 150초에 안내 메시지 반환
-const STREAM_TIMEOUT_MS = 150000;
+// "진전이 없는 채로" 이 시간이 지나면 중단(서버 멈춤 감지).
+// 답변이 흘러나오는 중엔 계속 리셋되므로, 긴 답변은 절대 잘리지 않음.
+const IDLE_TIMEOUT_MS = 90000;
 
 const systemPrompt = `당신은 대한민국 법률 전문가 AI 어시스턴트입니다.
 korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례·행정규칙 등)를 조회한 뒤,
@@ -56,9 +56,13 @@ export async function POST(req) {
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
 
-  // graceful 타임아웃용 AbortController
+  // idle 타임아웃: 진전(글자/도구호출)이 있을 때마다 리셋. 멈춰야만 abort.
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), STREAM_TIMEOUT_MS);
+  let idleTimer = setTimeout(() => abort.abort(), IDLE_TIMEOUT_MS);
+  const resetIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => abort.abort(), IDLE_TIMEOUT_MS);
+  };
 
   let response;
   try {
@@ -94,13 +98,13 @@ export async function POST(req) {
       }),
     });
   } catch (e) {
-    clearTimeout(timer);
+    clearTimeout(idleTimer);
     console.error('[ERROR] Claude API 호출 실패:', e.message);
     return Response.json({ error: 'API 호출 실패: ' + e.message }, { status: 502 });
   }
 
   if (!response.ok) {
-    clearTimeout(timer);
+    clearTimeout(idleTimer);
     const data = await response.json().catch(() => ({}));
     const errMsg = data.error?.message || 'API 오류';
     const isOverloaded = errMsg.toLowerCase().includes('overload') || response.status === 529;
@@ -143,16 +147,18 @@ export async function POST(req) {
                 continue;
               }
 
-              // (2) MCP 도구 호출 시작 → 진행상태 표시용 (도구 체인 길면 첫 글자까지 지연)
+              // (2) MCP 도구 호출 시작 → 진행상태 표시 + idle 타이머 리셋
               if (ev.type === 'content_block_start' && ev.content_block?.type === 'mcp_tool_use') {
+                resetIdle();
                 console.log('[DEBUG] MCP 도구 호출:', ev.content_block.name);
                 controller.enqueue(enc.encode(
                   'data: ' + JSON.stringify({ tool: ev.content_block.name }) + '\n\n'
                 ));
               }
 
-              // (3) 답변 텍스트 스트리밍
+              // (3) 답변 텍스트 스트리밍 → 글자 올 때마다 idle 타이머 리셋 (긴 답변 안 잘림)
               if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+                resetIdle();
                 fullText += ev.delta.text;
                 controller.enqueue(enc.encode(
                   'data: ' + JSON.stringify({ text: ev.delta.text }) + '\n\n'
@@ -175,16 +181,16 @@ export async function POST(req) {
           'data: ' + JSON.stringify({ done: true, full: fullText }) + '\n\n'
         ));
       } catch (e) {
-        // AbortError = 타임아웃, 그 외 = 스트림 처리 오류
+        // AbortError = idle 타임아웃(서버 멈춤), 그 외 = 스트림 처리 오류
         const msg = e.name === 'AbortError'
-          ? '응답 시간이 초과됐습니다. 질문이 복잡할 수 있어요. 더 구체적으로 나눠서 다시 시도해 주세요.'
+          ? '법령 서버 응답이 멈춰 중단했습니다. 잠시 후 다시 시도하거나 질문을 나눠 주세요.'
           : e.message;
         console.error('[ERROR] 스트림 처리:', e.name, e.message);
         controller.enqueue(enc.encode(
           'data: ' + JSON.stringify({ error: msg }) + '\n\n'
         ));
       } finally {
-        clearTimeout(timer);
+        clearTimeout(idleTimer);
         controller.close();
       }
     }
