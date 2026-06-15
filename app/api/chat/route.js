@@ -1,11 +1,14 @@
 export const maxDuration = 300;
 
-// 법제처 OC 키는 환경변수로 (Vercel 환경변수에 LAW_OC 추가)
-// MCP 서버가 이 키로 법제처를 호출함
+// 법제처 OC 키는 Vercel 환경변수(LAW_OC)에 설정. MCP 서버가 이 키로 법제처 호출
 const MCP_URL = `https://korean-law-mcp.fly.dev/mcp?oc=${process.env.LAW_OC}`;
 
 // 답변 모델: 비용 우선이면 sonnet, 품질 우선이면 opus로 교체
 const ANSWER_MODEL = 'claude-sonnet-4-6';
+
+// 하드 타임아웃(300초) 전에 graceful 실패시킬 시간.
+// 무거운 질문으로 MCP 서버가 멈춰도 5분 기다리지 않고 150초에 안내 메시지 반환
+const STREAM_TIMEOUT_MS = 150000;
 
 const systemPrompt = `당신은 대한민국 법률 전문가 AI 어시스턴트입니다.
 korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례·행정규칙 등)를 조회한 뒤,
@@ -13,7 +16,8 @@ korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례
 
 [도구 사용 원칙]
 - 질문을 받으면 먼저 korean-law 도구로 관련 법령·판례·해석례를 조회할 것.
-- 조문을 인용할 때는 verify_citations로 실존 여부를 검증할 것(환각 방지).
+- 도구 호출은 핵심만 최대 3~4회로 제한할 것. 단순 조문 질의는 search_law + get_law_text로 끝내고,
+  search_decisions(판례·결정례 통합검색)는 판례가 꼭 필요한 질문에만 사용할 것.
 - 도구 결과가 질문과 명백히 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
 
 [법적 위계 준수 - 핵심 규칙]
@@ -52,10 +56,15 @@ export async function POST(req) {
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
 
+  // graceful 타임아웃용 AbortController
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), STREAM_TIMEOUT_MS);
+
   let response;
   try {
     response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: abort.signal,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -64,7 +73,7 @@ export async function POST(req) {
       },
       body: JSON.stringify({
         model: ANSWER_MODEL,
-        max_tokens: 8000,
+        max_tokens: 16000,
         stream: true,
         system: systemPrompt,
         messages: messages.slice(-4).map(({ role, content }) => ({ role, content })),
@@ -72,21 +81,26 @@ export async function POST(req) {
           type: 'url',
           url: MCP_URL,
           name: 'korean-law',
-          // 필요한 도구만 노출하면 속도/정확도 향상 (선택)
-          // tool_configuration: {
-          //   enabled: true,
-          //   allowed_tools: ['chain_full_research', 'search_law', 'get_law_text',
-          //                   'search_decisions', 'get_decision_text', 'verify_citations'],
-          // },
+          tool_configuration: {
+            enabled: true,
+            // 무거운 chain_*/impact_map 제외, 핵심 검색·조회만 노출 → 폭주/지연 방지
+            // 환각 검증이 꼭 필요하면 'verify_citations' 추가 (호출 1회 늘어남)
+            allowed_tools: [
+              'search_law', 'get_law_text',
+              'search_decisions', 'get_decision_text',
+            ],
+          },
         }],
       }),
     });
   } catch (e) {
+    clearTimeout(timer);
     console.error('[ERROR] Claude API 호출 실패:', e.message);
     return Response.json({ error: 'API 호출 실패: ' + e.message }, { status: 502 });
   }
 
   if (!response.ok) {
+    clearTimeout(timer);
     const data = await response.json().catch(() => ({}));
     const errMsg = data.error?.message || 'API 오류';
     const isOverloaded = errMsg.toLowerCase().includes('overload') || response.status === 529;
@@ -120,23 +134,39 @@ export async function POST(req) {
             try {
               const ev = JSON.parse(data);
 
-              // (1) MCP 도구 호출 시작 → 프론트에 진행상태 표시용
-              //     도구 체인이 길면 첫 글자까지 시간이 걸리므로 "조회 중" 신호를 보냄
-              if (ev.type === 'content_block_start' &&
-                  ev.content_block?.type === 'mcp_tool_use') {
+              // (1) 스트림 중간 에러 → 프론트로 전달 + 로그 (조용히 삼켜지는 것 방지)
+              if (ev.type === 'error' || ev.error) {
+                console.error('[ERROR] 스트림 이벤트 에러:', JSON.stringify(ev));
+                controller.enqueue(enc.encode(
+                  'data: ' + JSON.stringify({ error: ev.error?.message || JSON.stringify(ev) }) + '\n\n'
+                ));
+                continue;
+              }
+
+              // (2) MCP 도구 호출 시작 → 진행상태 표시용 (도구 체인 길면 첫 글자까지 지연)
+              if (ev.type === 'content_block_start' && ev.content_block?.type === 'mcp_tool_use') {
                 console.log('[DEBUG] MCP 도구 호출:', ev.content_block.name);
                 controller.enqueue(enc.encode(
                   'data: ' + JSON.stringify({ tool: ev.content_block.name }) + '\n\n'
                 ));
               }
 
-              // (2) 답변 텍스트 스트리밍
-              if (ev.type === 'content_block_delta' &&
-                  ev.delta?.type === 'text_delta') {
+              // (3) 답변 텍스트 스트리밍
+              if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
                 fullText += ev.delta.text;
                 controller.enqueue(enc.encode(
                   'data: ' + JSON.stringify({ text: ev.delta.text }) + '\n\n'
                 ));
+              }
+
+              // (4) 종료 사유 확인 → max_tokens면 잘림 신호 전송
+              if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
+                console.log('[DEBUG] stop_reason:', ev.delta.stop_reason);
+                if (ev.delta.stop_reason === 'max_tokens') {
+                  controller.enqueue(enc.encode(
+                    'data: ' + JSON.stringify({ truncated: true }) + '\n\n'
+                  ));
+                }
               }
             } catch {}
           }
@@ -145,11 +175,16 @@ export async function POST(req) {
           'data: ' + JSON.stringify({ done: true, full: fullText }) + '\n\n'
         ));
       } catch (e) {
-        console.error('[ERROR] 스트림 처리 실패:', e.message);
+        // AbortError = 타임아웃, 그 외 = 스트림 처리 오류
+        const msg = e.name === 'AbortError'
+          ? '응답 시간이 초과됐습니다. 질문이 복잡할 수 있어요. 더 구체적으로 나눠서 다시 시도해 주세요.'
+          : e.message;
+        console.error('[ERROR] 스트림 처리:', e.name, e.message);
         controller.enqueue(enc.encode(
-          'data: ' + JSON.stringify({ error: e.message }) + '\n\n'
+          'data: ' + JSON.stringify({ error: msg }) + '\n\n'
         ));
       } finally {
+        clearTimeout(timer);
         controller.close();
       }
     }
