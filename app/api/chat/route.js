@@ -6,9 +6,9 @@ const MCP_URL = `https://korean-law-mcp.fly.dev/mcp?oc=${process.env.LAW_OC}`;
 // 답변 모델: 비용 우선이면 sonnet, 품질 우선이면 opus로 교체
 const ANSWER_MODEL = 'claude-sonnet-4-6';
 
-// "진전이 없는 채로" 이 시간이 지나면 중단(서버 멈춤 감지).
+// "진전이 없는 채로" 이 시간이 지나면 중단(서버 멈춤 감지). 안전망 120초.
 // 답변이 흘러나오는 중엔 계속 리셋되므로, 긴 답변은 절대 잘리지 않음.
-const IDLE_TIMEOUT_MS = 90000;
+const IDLE_TIMEOUT_MS = 120000;
 
 const systemPrompt = `당신은 대한민국 법률 전문가 AI 어시스턴트입니다.
 korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례·행정규칙 등)를 조회한 뒤,
@@ -16,8 +16,11 @@ korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례
 
 [도구 사용 원칙]
 - 질문을 받으면 먼저 korean-law 도구로 관련 법령·판례·해석례를 조회할 것.
-- 도구 호출은 핵심만 최대 3~4회로 제한할 것. 단순 조문 질의는 search_law + get_law_text로 끝내고,
-  search_decisions(판례·결정례 통합검색)는 판례가 꼭 필요한 질문에만 사용할 것.
+- 질문 성격에 맞는 도구를 충분히 활용할 것: 판례·결정례가 필요하면 search_decisions,
+  별표·서식이 필요하면 get_annexes, 다단계 리서치가 필요하면 chain 계열 도구 등 적절히 사용.
+- get_law_text는 법령 전체를 통째로 가져오지 말 것. 반드시 질문과 직접 관련된 핵심 조문만
+  콕 집어(조문번호 지정) 조회할 것. (전체 법령 조회는 응답 지연·중단의 주원인)
+- 답변에 인용한 조문은 verify_citations로 실존 여부를 검증하여 환각을 방지할 것.
 - 도구 결과가 질문과 명백히 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
 
 [법적 위계 준수 - 핵심 규칙]
@@ -81,19 +84,11 @@ export async function POST(req) {
         stream: true,
         system: systemPrompt,
         messages: messages.slice(-4).map(({ role, content }) => ({ role, content })),
+        // 도구 제한 없음 — claude.ai처럼 17개 도구 전부 사용 가능
         mcp_servers: [{
           type: 'url',
           url: MCP_URL,
           name: 'korean-law',
-          tool_configuration: {
-            enabled: true,
-            // 무거운 chain_*/impact_map 제외, 핵심 검색·조회만 노출 → 폭주/지연 방지
-            // 환각 검증이 꼭 필요하면 'verify_citations' 추가 (호출 1회 늘어남)
-            allowed_tools: [
-              'search_law', 'get_law_text',
-              'search_decisions', 'get_decision_text',
-            ],
-          },
         }],
       }),
     });
