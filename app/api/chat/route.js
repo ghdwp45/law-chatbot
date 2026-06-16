@@ -9,13 +9,16 @@ const systemPrompt = `당신은 대한민국 법률 전문가 AI 어시스턴트
 korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례·행정규칙 등)를 조회한 뒤,
 그 데이터를 최우선 근거로 정확하고 완전한 답변을 제공합니다.
 
-[도구 사용 원칙]
-- 먼저 search_law + get_law_text(핵심 조문만, 조문번호 지정)로 법령 원문을 확인할 것.
-- 심화 분석이 필요하면 discover_tools로 적합한 도구를 탐색한 뒤 execute_tool 또는
-  legal_research를 사용할 것. (도구를 직접 지목하지 말고 탐색 후 선택)
-- search_decisions는 사용하지 말 것. (17개 도메인 동시조회로 응답 지연·중단의 직접 원인)
+[도구 사용 전략 - 중요]
+- 법령 조회: search_law로 법령을 찾고, get_law_text로 핵심 조문만 콕 집어(조문번호 지정) 조회.
+  법령 전체를 통째로 가져오지 말 것. (전체 조회는 응답 지연의 주원인)
+- 판례·해석례·심판례 조회: 통합 search_decisions를 쓰지 말 것.
+  대신 discover_tools로 도메인별 개별 도구를 먼저 확인한 뒤,
+  execute_tool로 필요한 도메인만 골라 병렬 호출할 것.
+  · 세무 질문: 조세심판(tax_tribunal), 해석례(interpretation), 국세청(nts), 판례(precedent) 중 관련 2~4개만.
+  · 각 도메인은 한 번씩, 키워드를 좁혀서 호출. 전체 도메인 일괄 조회 금지.
 - 별표·서식이 필요하면 get_annexes 사용.
-- 답변에 인용한 조문은 verify_citations로 실존 여부 검증하여 환각을 방지할 것.
+- 답변에 인용한 조문은 verify_citations로 실존 여부를 검증하여 환각을 방지할 것.
 - 도구 결과가 질문과 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
 
 [법적 위계 준수 - 핵심 규칙]
@@ -53,12 +56,12 @@ export async function POST(req) {
   const { messages } = await req.json();
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
 
-  // ★ OC 키 진단 로그 (값은 안 찍고 세팅 여부만)
+  // OC 키 진단 로그
   console.log('[DEBUG] OC:', process.env.LAW_OC ? `set(len=${process.env.LAW_OC.length})` : '❌ MISSING');
   console.log('[DEBUG] MCP_URL:', MCP_URL.replace(/oc=([^&]+)/, 'oc=***'));
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
 
-  // LAW_OC 없으면 4분 무한재시도 대신 즉시 에러 반환
+  // LAW_OC 없으면 즉시 에러 (4분 무한재시도 방지)
   if (!process.env.LAW_OC) {
     return Response.json({ error: '서버 설정 오류: 법령 API 키가 설정되지 않았습니다. 관리자에게 문의하세요.' }, { status: 500 });
   }
@@ -96,6 +99,21 @@ export async function POST(req) {
           type: 'url',
           url: MCP_URL,
           name: 'korean-law',
+          // (A) 통합 search_decisions 차단, 개별 도메인 경로는 전부 열어둠
+          // 클로드챗처럼 discover_tools → execute_tool 개별 도메인 병렬 호출 유도
+          tool_configuration: {
+            enabled: true,
+            allowed_tools: [
+              'search_law',         // 법령 검색
+              'get_law_text',       // 조문 조회
+              'get_annexes',        // 별표·서식
+              'discover_tools',     // 도메인별 개별 도구 탐색 (클로드챗 핵심)
+              'execute_tool',       // 개별 도메인 도구 병렬 호출 (클로드챗 핵심)
+              'legal_research',     // 다단계 리서치
+              'verify_citations',   // 환각 방지 검증
+              // search_decisions 제외 → 17개 동시 fan-out 차단
+            ],
+          },
         }],
       }),
     });
