@@ -1,218 +1,263 @@
+import Anthropic from '@anthropic-ai/sdk';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 const MCP_URL = `https://korean-law-mcp.fly.dev/mcp?oc=${process.env.LAW_OC}`;
 const ANSWER_MODEL = 'claude-sonnet-4-6';
-const IDLE_TIMEOUT_MS = 120000;
-const TOTAL_TIMEOUT_MS = 250000;
 
-const systemPrompt = `당신은 대한민국 법률 전문가 AI 어시스턴트입니다.
-korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례·행정규칙 등)를 조회한 뒤,
-그 데이터를 최우선 근거로 정확하고 완전한 답변을 제공합니다.
+const TOOL_TIMEOUT_MS = 20000;
+const TOTAL_TIMEOUT_MS = 240000;
+const MAX_STEPS = 8;
+const MAX_TOOL_RESULT_CHARS = 12000;
+const TOOL_DEFS = [
+  {
+    name: 'search_law',
+    description: '법령을 이름으로 검색해 mst(법령일련번호)와 lawId를 얻는다. 조문 본문은 get_law_text로 따로 조회.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: "법령명 (예: '법인세법')" },
+        display: { type: 'number', description: '최대 결과 수(기본 50)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'get_law_text',
+    description: '법령의 특정 조문 본문을 조회. mst 또는 lawId 중 하나는 필수. 전체 법령을 통째로 받지 말고 jo로 핵심 조문만 지정할 것.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        mst: { type: 'string', description: 'search_law에서 얻은 법령일련번호' },
+        lawId: { type: 'string', description: 'search_law에서 얻은 법령ID' },
+        jo: { type: 'string', description: "조문번호 (예: '제57조' 또는 '005700')" },
+        efYd: { type: 'string', description: '시행일자 YYYYMMDD (선택)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'search_precedents',
+    description: '법원 판례 검색.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '검색 키워드' },
+        display: { type: 'number', description: '결과 수(기본 20, 최대 100)' },
+        page: { type: 'number' },
+        court: { type: 'string', description: '법원명(선택)' },
+        caseNumber: { type: 'string', description: '사건번호(선택)' },
+        fromDate: { type: 'string', description: 'YYYYMMDD' },
+        toDate: { type: 'string', description: 'YYYYMMDD' },
+        sort: { type: 'string', enum: ['lasc', 'ldes', 'dasc', 'ddes', 'nasc', 'ndes'] },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'search_interpretations',
+    description: '기획재정부·국세청 등의 법령해석·예규(해석례) 검색.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '검색 키워드' },
+        display: { type: 'number', description: '결과 수(기본 20, 최대 100)' },
+        page: { type: 'number' },
+        fromDate: { type: 'string', description: '회신일 시작 YYYYMMDD' },
+        toDate: { type: 'string', description: '회신일 종료 YYYYMMDD' },
+        sort: { type: 'string', enum: ['lasc', 'ldes', 'dasc', 'ddes', 'nasc', 'ndes'] },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'search_tax_tribunal_decisions',
+    description: '조세심판원 결정례 검색.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '검색 키워드' },
+        display: { type: 'number', description: '결과 수(기본 20, 최대 100)' },
+        page: { type: 'number' },
+        cls: { type: 'string', description: '재결구분코드(선택)' },
+        dpaYd: { type: 'string', description: '처분일 범위 YYYYMMDD~YYYYMMDD' },
+        rslYd: { type: 'string', description: '결정일 범위 YYYYMMDD~YYYYMMDD' },
+        sort: { type: 'string', enum: ['lasc', 'ldes', 'dasc', 'ddes', 'nasc', 'ndes'] },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'get_decision_text',
+    description: '검색으로 찾은 판례/해석례/심판례의 전문을 조회해 사건번호·예규번호를 정확히 확인한다.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: {
+          type: 'string',
+          description: '검색한 도메인',
+          enum: ['precedent', 'interpretation', 'tax_tribunal', 'nts', 'constitutional', 'treaty'],
+        },
+        id: { type: 'string', description: '검색 결과의 일련번호/ID' },
+        full: { type: 'boolean', description: 'true=전문, 미지정=축약' },
+      },
+      required: ['domain', 'id'],
+    },
+  },
+];
 
-[도구 사용 전략 - 중요]
-- 법령 조회: search_law로 법령을 찾고, get_law_text로 핵심 조문만 콕 집어(조문번호 지정) 조회.
-  법령 전체를 통째로 가져오지 말 것. (전체 조회는 응답 지연의 주원인)
-- 판례·해석례·심판례 조회: 통합 search_decisions를 쓰지 말 것.
-  대신 discover_tools로 도메인별 개별 도구를 먼저 확인한 뒤,
-  execute_tool로 필요한 도메인만 골라 병렬 호출할 것.
-  · 세무 질문: 조세심판(tax_tribunal), 해석례(interpretation), 국세청(nts), 판례(precedent) 중 관련 2~4개만.
-  · 각 도메인은 한 번씩, 키워드를 좁혀서 호출. 전체 도메인 일괄 조회 금지.
-- 별표·서식이 필요하면 get_annexes 사용.
-- 답변에 인용한 조문은 verify_citations로 실존 여부를 검증하여 환각을 방지할 것.
-- 도구 결과가 질문과 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
+const ALLOWED = new Set(TOOL_DEFS.map((t) => t.name));
+const systemPrompt = `당신은 대한민국 법률·세무 전문가 AI 어시스턴트입니다.
+korean-law 도구로 법제처 실시간 데이터를 조회한 뒤, 그 데이터를 최우선 근거로 답변합니다.
 
-[법적 위계 준수 - 핵심 규칙]
-1. 원칙 기준: 세무·법률 판단의 원칙은 반드시 [법령 원문]과 [기획재정부/국세청 예규·해석례]를 기준으로 먼저 서술할 것.
-2. 심판례/판례의 제한적 해석: 조세심판원 결정례나 판례에서 납세자가 승소했다고 해서, 그 예외적 방식이 세법상 '합법' 또는 '표준 실무'라고 확대 해석 금지.
-3. 구조 분리: [원칙적인 세무 실무]와 [예외적 구제 및 참고 심판례]를 엄격히 분리. 심판례는 "예외적 구제 가능성"으로만 제시.
-4. 원칙 우선 결론: 핵심 결론은 법령·예규 원칙 기준으로 작성. 심판례로 결론을 뒤집지 말 것.
+[도구 사용 원칙]
+- 먼저 search_law로 법령을 찾고(mst 획득), get_law_text로 핵심 조문만(mst+jo 지정) 조회한다. 법령 전체를 통째로 받지 말 것.
+- 판례·해석례·심판례가 필요하면 도메인별 도구를 병렬로 호출한다:
+  · search_precedents (법원 판례)
+  · search_interpretations (기재부·국세청 법령해석·예규)
+  · search_tax_tribunal_decisions (조세심판원 결정례)
+- 핵심 항목은 get_decision_text(domain, id)로 전문을 확인해 사건번호·예규번호를 정확히 인용한다.
+- 같은 도메인을 반복 호출하지 말고, 키워드를 좁혀 한두 번이면 충분하다.
+- 도구 결과가 질문과 무관하면 억지로 엮지 말고 AI 지식으로 원칙을 설명한다.
+
+[법적 위계 준수]
+1. 원칙은 [법령 원문]과 [기재부/국세청 예규·해석례] 기준으로 먼저 서술.
+2. 심판례·판례에서 납세자가 승소했다고 그 방식을 '합법/표준 실무'로 확대 해석 금지.
+3. [원칙적 세무 실무]와 [예외적 구제 및 참고 심판례]를 분리. 심판례는 "예외적 구제 가능성"으로만 제시.
+4. 핵심 결론은 법령·예규 기준으로 작성. 심판례로 결론을 뒤집지 말 것.
 
 [출처 태그 - 모든 내용에 필수]
-📋 [법령 원문] - MCP로 조회한 조문 인용 시
-⚖️ [판례/해석례] - 판례/예규 인용 시 반드시 사건번호 또는 예규번호 명시
-💡 [AI 해설] - 법령 지식 기반 해석 및 실무 설명
-⚠️ [AI 추정] - 출처를 특정할 수 없거나 불확실한 내용
-- 별표(★)·신뢰도 표시(★★★) 사용 금지
-- 한국어로만 답변
+📋 [법령 원문] / ⚖️ [판례·해석례](사건번호·예규번호 명시) / 💡 [AI 해설] / ⚠️ [AI 추정]
+- 별표(★)·신뢰도 표시 금지. 한국어로만 답변.
 
 [답변 형식]
 ===해설===
 # 📌 사안의 쟁점
-질문을 1~2줄로 명확히 재구성
-
+질문을 1~2줄로 재구성
 # 💡 핵심 결론
-핵심 답변을 2~3줄로 요약 (두괄식)
-
+2~3줄 두괄식 요약
 # 📖 상세 해설
-법령이 사안에 적용되는 과정을 논리적 순서로 설명.
-전문 용어는 쉽게 풀어서. 각 내용 앞에 출처 태그를 반드시 표시.
+법령 적용 과정을 논리적으로. 각 내용 앞에 출처 태그.
 ===해설끝===
 
 ===관련법령===
 법령명|조문번호|설명
 ===관련법령끝===`;
 
+function toToolResultText(r) {
+  if (r && r.__error) return `조회 실패: ${r.message}`;
+  const parts = Array.isArray(r?.content) ? r.content : [];
+  let text = parts.map((p) => p?.text ?? (typeof p === 'string' ? p : JSON.stringify(p))).join('\n');
+  if (!text) text = JSON.stringify(r);
+  return text.length > MAX_TOOL_RESULT_CHARS
+    ? text.slice(0, MAX_TOOL_RESULT_CHARS) + '\n…(결과가 길어 일부 생략)'
+    : text;
+}
 export async function POST(req) {
   const { messages } = await req.json();
-  const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
-
-  // OC 키 진단 로그
+  const lastUserMsg = messages.filter((m) => m.role === 'user').at(-1)?.content || '';
   console.log('[DEBUG] OC:', process.env.LAW_OC ? `set(len=${process.env.LAW_OC.length})` : '❌ MISSING');
-  console.log('[DEBUG] MCP_URL:', MCP_URL.replace(/oc=([^&]+)/, 'oc=***'));
-  console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
+  console.log('[DEBUG] 질문:', lastUserMsg.slice(0, 50));
 
-  // LAW_OC 없으면 즉시 에러 (4분 무한재시도 방지)
   if (!process.env.LAW_OC) {
-    return Response.json({ error: '서버 설정 오류: 법령 API 키가 설정되지 않았습니다. 관리자에게 문의하세요.' }, { status: 500 });
+    return Response.json({ error: '서버 설정 오류: 법령 API 키 미설정' }, { status: 500 });
   }
 
-  const abort = new AbortController();
-  let abortReason = null;
-
-  let idleTimer;
-  const resetIdle = () => {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { abortReason = 'IDLE'; abort.abort(); }, IDLE_TIMEOUT_MS);
-  };
-  const totalTimer = setTimeout(() => { abortReason = 'TOTAL'; abort.abort(); }, TOTAL_TIMEOUT_MS);
-  const clearTimers = () => { clearTimeout(idleTimer); clearTimeout(totalTimer); };
-  resetIdle();
-
-  let response;
-  try {
-    response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      signal: abort.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'mcp-client-2025-04-04',
-      },
-      body: JSON.stringify({
-        model: ANSWER_MODEL,
-        max_tokens: 16000,
-        stream: true,
-        system: systemPrompt,
-        messages: messages.slice(-4).map(({ role, content }) => ({ role, content })),
-        mcp_servers: [{
-          type: 'url',
-          url: MCP_URL,
-          name: 'korean-law',
-          // (A) 통합 search_decisions 차단, 개별 도메인 경로는 전부 열어둠
-          // 클로드챗처럼 discover_tools → execute_tool 개별 도메인 병렬 호출 유도
-          tool_configuration: {
-            enabled: true,
-            allowed_tools: [
-              'search_law',         // 법령 검색
-              'get_law_text',       // 조문 조회
-              'get_annexes',        // 별표·서식
-              'discover_tools',     // 도메인별 개별 도구 탐색 (클로드챗 핵심)
-              'execute_tool',       // 개별 도메인 도구 병렬 호출 (클로드챗 핵심)
-              'legal_research',     // 다단계 리서치
-              'verify_citations',   // 환각 방지 검증
-              // search_decisions 제외 → 17개 동시 fan-out 차단
-            ],
-          },
-        }],
-      }),
-    });
-  } catch (e) {
-    clearTimers();
-    console.error('[ERROR] Claude API 호출 실패:', e.message);
-    return Response.json({ error: 'API 호출 실패: ' + e.message }, { status: 502 });
-  }
-
-  if (!response.ok) {
-    clearTimers();
-    const data = await response.json().catch(() => ({}));
-    const errMsg = data.error?.message || 'API 오류';
-    const isOverloaded = errMsg.toLowerCase().includes('overload') || response.status === 529;
-    if (isOverloaded) {
-      return Response.json(
-        { error: 'Overloaded: 서버 과부하 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' },
-        { status: 529 }
-      );
-    }
-    return Response.json({ error: errMsg }, { status: response.status });
-  }
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const enc = new TextEncoder();
+  const deadline = Date.now() + TOTAL_TIMEOUT_MS;
 
   const stream = new ReadableStream({
     async start(controller) {
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      const enc = new TextEncoder();
-      let buffer = '';
-      let fullText = '';
+      const send = (obj) => controller.enqueue(enc.encode('data: ' + JSON.stringify(obj) + '\n\n'));
+
+      const mcpClient = new Client({ name: 'law-chatbot', version: '1.0.0' }, { capabilities: {} });
+      let mcpConnected = false;
       try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          resetIdle(); // 바이트 오면 무조건 idle 리셋
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') continue;
-            try {
-              const ev = JSON.parse(data);
-
-              if (ev.type === 'error' || ev.error) {
-                console.error('[ERROR] 스트림 이벤트 에러:', JSON.stringify(ev));
-                controller.enqueue(enc.encode(
-                  'data: ' + JSON.stringify({ error: ev.error?.message || JSON.stringify(ev) }) + '\n\n'
-                ));
-                continue;
-              }
-
-              if (ev.type === 'content_block_start' && ev.content_block?.type === 'mcp_tool_use') {
-                console.log('[DEBUG] MCP 도구 호출:', ev.content_block.name);
-                controller.enqueue(enc.encode(
-                  'data: ' + JSON.stringify({ tool: ev.content_block.name }) + '\n\n'
-                ));
-              }
-
-              if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-                fullText += ev.delta.text;
-                controller.enqueue(enc.encode(
-                  'data: ' + JSON.stringify({ text: ev.delta.text }) + '\n\n'
-                ));
-              }
-
-              if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
-                console.log('[DEBUG] stop_reason:', ev.delta.stop_reason);
-                if (ev.delta.stop_reason === 'max_tokens') {
-                  controller.enqueue(enc.encode(
-                    'data: ' + JSON.stringify({ truncated: true }) + '\n\n'
-                  ));
-                }
-              }
-            } catch {}
-          }
-        }
-        controller.enqueue(enc.encode(
-          'data: ' + JSON.stringify({ done: true, full: fullText }) + '\n\n'
-        ));
+        await mcpClient.connect(new StreamableHTTPClientTransport(new URL(MCP_URL)));
+        mcpConnected = true;
       } catch (e) {
-        let msg;
-        if (abortReason === 'IDLE') {
-          msg = '법령 서버 응답이 끊겼습니다(연결 무응답). 잠시 후 다시 시도해 주세요.';
-        } else if (abortReason === 'TOTAL') {
-          msg = '처리 시간이 초과됐습니다. 질문을 나눠서 다시 시도해 주세요.';
-        } else {
-          msg = e.message;
+        console.error('[ERROR] MCP 연결 실패:', e.message);
+        send({ error: '법령 서버 연결 실패: ' + e.message });
+        controller.close();
+        return;
+      }
+
+      async function runTool(name, input) {
+        if (!ALLOWED.has(name)) {
+          return { __error: true, message: `비활성 도구(${name})` };
         }
-        console.error('[ERROR] 스트림 처리:', abortReason || e.name, e.message);
-        controller.enqueue(enc.encode(
-          'data: ' + JSON.stringify({ error: msg }) + '\n\n'
-        ));
+        console.log('[DEBUG] 도구:', name, '입력:', JSON.stringify(input));
+        try {
+          return await mcpClient.callTool({ name, arguments: input }, undefined, { timeout: TOOL_TIMEOUT_MS });
+        } catch (e) {
+          console.error('[ERROR] 도구 타임아웃/실패:', name, e.message);
+          return { __error: true, message: `${name} 조회 실패로 건너뜀` };
+        }
+      }
+
+      const convo = messages.slice(-4).map(({ role, content }) => ({ role, content }));
+      let fullText = '';
+
+      try {
+        for (let step = 0; step < MAX_STEPS; step++) {
+          if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
+          const signal = AbortSignal.timeout(Math.max(1000, deadline - Date.now()));
+
+          const ms = anthropic.messages.stream(
+            {
+              model: ANSWER_MODEL,
+              max_tokens: 16000,
+              system: systemPrompt,
+              tools: TOOL_DEFS,
+              messages: convo,
+            },
+            { signal }
+          );
+
+          for await (const ev of ms) {
+            if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
+              console.log('[DEBUG] MCP 도구 호출:', ev.content_block.name);
+              send({ tool: ev.content_block.name });
+            } else if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+              fullText += ev.delta.text;
+              send({ text: ev.delta.text });
+            }
+          }
+
+          const final = await ms.finalMessage();
+          if (final.stop_reason === 'max_tokens') send({ truncated: true });
+
+          const toolUses = final.content.filter((c) => c.type === 'tool_use');
+          if (toolUses.length === 0) break;
+
+          convo.push({ role: 'assistant', content: final.content });
+          const results = await Promise.all(
+            toolUses.map(async (tu) => ({
+              type: 'tool_result',
+              tool_use_id: tu.id,
+              content: toToolResultText(await runTool(tu.name, tu.input)),
+            }))
+          );
+          convo.push({ role: 'user', content: results });
+        }
+
+        send({ done: true, full: fullText });
+      } catch (e) {
+        const msg =
+          e.message === 'TOTAL_TIMEOUT' || e.name === 'TimeoutError' || e.name === 'AbortError'
+            ? '처리 시간이 초과됐습니다. 질문을 나눠서 다시 시도해 주세요.'
+            : e.message;
+        console.error('[ERROR] 루프:', e.name, e.message);
+        send({ error: msg });
       } finally {
-        clearTimers();
+        if (mcpConnected) await mcpClient.close().catch(() => {});
         controller.close();
       }
-    }
+    },
   });
 
   return new Response(stream, {
