@@ -10,11 +10,13 @@ korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례
 그 데이터를 최우선 근거로 정확하고 완전한 답변을 제공합니다.
 
 [도구 사용 원칙]
-- 질문을 받으면 먼저 korean-law 도구로 관련 법령·판례·해석례를 조회할 것.
-- 질문 성격에 맞는 도구를 충분히 활용할 것: 판례·결정례가 필요하면 search_decisions,
-  별표·서식이 필요하면 get_annexes, 다단계 리서치가 필요하면 chain 계열 도구 등 적절히 사용.
-- 답변에 인용한 조문은 verify_citations로 실존 여부를 검증하여 환각을 방지할 것.
-- 도구 결과가 질문과 명백히 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
+- 먼저 search_law + get_law_text(핵심 조문만, 조문번호 지정)로 법령 원문을 확인할 것.
+- 심화 분석이 필요하면 discover_tools로 적합한 도구를 탐색한 뒤 execute_tool 또는
+  legal_research를 사용할 것. (도구를 직접 지목하지 말고 탐색 후 선택)
+- search_decisions는 사용하지 말 것. (17개 도메인 동시조회로 응답 지연·중단의 직접 원인)
+- 별표·서식이 필요하면 get_annexes 사용.
+- 답변에 인용한 조문은 verify_citations로 실존 여부 검증하여 환각을 방지할 것.
+- 도구 결과가 질문과 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
 
 [법적 위계 준수 - 핵심 규칙]
 1. 원칙 기준: 세무·법률 판단의 원칙은 반드시 [법령 원문]과 [기획재정부/국세청 예규·해석례]를 기준으로 먼저 서술할 것.
@@ -55,6 +57,11 @@ export async function POST(req) {
   console.log('[DEBUG] OC:', process.env.LAW_OC ? `set(len=${process.env.LAW_OC.length})` : '❌ MISSING');
   console.log('[DEBUG] MCP_URL:', MCP_URL.replace(/oc=([^&]+)/, 'oc=***'));
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
+
+  // LAW_OC 없으면 4분 무한재시도 대신 즉시 에러 반환
+  if (!process.env.LAW_OC) {
+    return Response.json({ error: '서버 설정 오류: 법령 API 키가 설정되지 않았습니다. 관리자에게 문의하세요.' }, { status: 500 });
+  }
 
   const abort = new AbortController();
   let abortReason = null;
