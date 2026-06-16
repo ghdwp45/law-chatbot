@@ -1,14 +1,8 @@
 export const maxDuration = 300;
 
-// 법제처 OC 키는 Vercel 환경변수(LAW_OC)에 설정. MCP 서버가 이 키로 법제처 호출
 const MCP_URL = `https://korean-law-mcp.fly.dev/mcp?oc=${process.env.LAW_OC}`;
-
-// 답변 모델: 비용 우선이면 sonnet, 품질 우선이면 opus로 교체
 const ANSWER_MODEL = 'claude-sonnet-4-6';
-
-// idle: 스트림에서 바이트(ping 포함)가 올 때마다 리셋. 진짜 연결이 죽어 완전 무음일 때만 발동.
 const IDLE_TIMEOUT_MS = 120000;
-// total: 살아있어도(ping만 오고 도구가 끝없이 멈춰도) Vercel 300초 강제종료 전에 깔끔히 종료.
 const TOTAL_TIMEOUT_MS = 250000;
 
 const systemPrompt = `당신은 대한민국 법률 전문가 AI 어시스턴트입니다.
@@ -16,16 +10,9 @@ korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례
 그 데이터를 최우선 근거로 정확하고 완전한 답변을 제공합니다.
 
 [도구 사용 원칙]
-- 질문을 받으면 먼저 search_law + get_law_text(핵심 조문만, 조문번호 지정)로 법령을 조회할 것.
-- get_law_text는 법령 전체를 통째로 가져오지 말 것. 반드시 질문과 직접 관련된 핵심 조문만
-  콕 집어(조문번호 지정) 조회할 것. (전체 법령 조회는 응답 지연·중단의 주원인)
-- search_decisions는 판례·결정례가 결론에 반드시 필요한 질문에만 사용할 것.
-  반드시 domain 파라미터를 지정하여 필요한 도메인만 검색할 것:
-  · 세무/조세 질문: domain=["precedent","tax_tribunal","interpretation"]
-  · 노동/인사 질문: domain=["precedent","admin_appeal","labor_committee"]
-  · 일반 법령 질문: domain=["precedent","admin_appeal"]
-  · 절대 domain 없이 전체(17개) 검색 금지 — 서버 과부하의 직접 원인
-- 별표·서식이 필요하면 get_annexes 사용.
+- 질문을 받으면 먼저 korean-law 도구로 관련 법령·판례·해석례를 조회할 것.
+- 질문 성격에 맞는 도구를 충분히 활용할 것: 판례·결정례가 필요하면 search_decisions,
+  별표·서식이 필요하면 get_annexes, 다단계 리서치가 필요하면 chain 계열 도구 등 적절히 사용.
 - 답변에 인용한 조문은 verify_citations로 실존 여부를 검증하여 환각을 방지할 것.
 - 도구 결과가 질문과 명백히 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
 
@@ -64,14 +51,13 @@ export async function POST(req) {
   const { messages } = await req.json();
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
 
-  // ★ OC 키 진단 로그 — 세팅됐는지 확인 (값 자체는 안 찍음)
-  console.log('[DEBUG] OC:', process.env.LAW_OC ? `set(len=${process.env.LAW_OC.length})` : '❌ MISSING — LAW_OC 환경변수 없음');
+  // ★ OC 키 진단 로그 (값은 안 찍고 세팅 여부만)
+  console.log('[DEBUG] OC:', process.env.LAW_OC ? `set(len=${process.env.LAW_OC.length})` : '❌ MISSING');
   console.log('[DEBUG] MCP_URL:', MCP_URL.replace(/oc=([^&]+)/, 'oc=***'));
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
 
-  // ── 타임아웃 2종 ──────────────────────────────────────────────
   const abort = new AbortController();
-  let abortReason = null; // 'IDLE' | 'TOTAL' | null
+  let abortReason = null;
 
   let idleTimer;
   const resetIdle = () => {
@@ -81,7 +67,6 @@ export async function POST(req) {
   const totalTimer = setTimeout(() => { abortReason = 'TOTAL'; abort.abort(); }, TOTAL_TIMEOUT_MS);
   const clearTimers = () => { clearTimeout(idleTimer); clearTimeout(totalTimer); };
   resetIdle();
-  // ─────────────────────────────────────────────────────────────
 
   let response;
   try {
@@ -138,9 +123,7 @@ export async function POST(req) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          // 어떤 바이트든(ping·도구입력·결과 등) 오면 idle 리셋
-          resetIdle();
-
+          resetIdle(); // 바이트 오면 무조건 idle 리셋
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
@@ -151,7 +134,6 @@ export async function POST(req) {
             try {
               const ev = JSON.parse(data);
 
-              // 스트림 중간 에러 → 프론트로 전달 + 로그
               if (ev.type === 'error' || ev.error) {
                 console.error('[ERROR] 스트림 이벤트 에러:', JSON.stringify(ev));
                 controller.enqueue(enc.encode(
@@ -160,7 +142,6 @@ export async function POST(req) {
                 continue;
               }
 
-              // MCP 도구 호출 시작 → 진행상태 표시
               if (ev.type === 'content_block_start' && ev.content_block?.type === 'mcp_tool_use') {
                 console.log('[DEBUG] MCP 도구 호출:', ev.content_block.name);
                 controller.enqueue(enc.encode(
@@ -168,7 +149,6 @@ export async function POST(req) {
                 ));
               }
 
-              // 답변 텍스트 스트리밍
               if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
                 fullText += ev.delta.text;
                 controller.enqueue(enc.encode(
@@ -176,7 +156,6 @@ export async function POST(req) {
                 ));
               }
 
-              // 종료 사유 → max_tokens면 잘림 신호
               if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
                 console.log('[DEBUG] stop_reason:', ev.delta.stop_reason);
                 if (ev.delta.stop_reason === 'max_tokens') {
