@@ -16,11 +16,16 @@ korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례
 그 데이터를 최우선 근거로 정확하고 완전한 답변을 제공합니다.
 
 [도구 사용 원칙]
-- 질문을 받으면 먼저 korean-law 도구로 관련 법령·판례·해석례를 조회할 것.
-- 질문 성격에 맞는 도구를 충분히 활용할 것: 판례·결정례가 필요하면 search_decisions,
-  별표·서식이 필요하면 get_annexes, 다단계 리서치가 필요하면 chain 계열 도구 등 적절히 사용.
+- 질문을 받으면 먼저 search_law + get_law_text(핵심 조문만, 조문번호 지정)로 법령을 조회할 것.
 - get_law_text는 법령 전체를 통째로 가져오지 말 것. 반드시 질문과 직접 관련된 핵심 조문만
   콕 집어(조문번호 지정) 조회할 것. (전체 법령 조회는 응답 지연·중단의 주원인)
+- search_decisions는 판례·결정례가 결론에 반드시 필요한 질문에만 사용할 것.
+  반드시 domain 파라미터를 지정하여 필요한 도메인만 검색할 것:
+  · 세무/조세 질문: domain=["precedent","tax_tribunal","interpretation"]
+  · 노동/인사 질문: domain=["precedent","admin_appeal","labor_committee"]
+  · 일반 법령 질문: domain=["precedent","admin_appeal"]
+  · 절대 domain 없이 전체(17개) 검색 금지 — 서버 과부하의 직접 원인
+- 별표·서식이 필요하면 get_annexes 사용.
 - 답변에 인용한 조문은 verify_citations로 실존 여부를 검증하여 환각을 방지할 것.
 - 도구 결과가 질문과 명백히 무관하면 억지로 엮지 말고, AI 학습 지식으로 원칙을 설명할 것.
 
@@ -58,11 +63,15 @@ korean-law MCP 도구로 법제처 실시간 데이터(법령·판례·해석례
 export async function POST(req) {
   const { messages } = await req.json();
   const lastUserMsg = messages.filter(m => m.role === 'user').at(-1)?.content || '';
+
+  // ★ OC 키 진단 로그 — 세팅됐는지 확인 (값 자체는 안 찍음)
+  console.log('[DEBUG] OC:', process.env.LAW_OC ? `set(len=${process.env.LAW_OC.length})` : '❌ MISSING — LAW_OC 환경변수 없음');
+  console.log('[DEBUG] MCP_URL:', MCP_URL.replace(/oc=([^&]+)/, 'oc=***'));
   console.log('[DEBUG] 사용자 질문:', lastUserMsg.slice(0, 50));
 
   // ── 타임아웃 2종 ──────────────────────────────────────────────
   const abort = new AbortController();
-  let abortReason = null; // 'IDLE' | 'TOTAL' | null  (signal.reason보다 portable)
+  let abortReason = null; // 'IDLE' | 'TOTAL' | null
 
   let idleTimer;
   const resetIdle = () => {
@@ -71,7 +80,7 @@ export async function POST(req) {
   };
   const totalTimer = setTimeout(() => { abortReason = 'TOTAL'; abort.abort(); }, TOTAL_TIMEOUT_MS);
   const clearTimers = () => { clearTimeout(idleTimer); clearTimeout(totalTimer); };
-  resetIdle(); // 시작
+  resetIdle();
   // ─────────────────────────────────────────────────────────────
 
   let response;
@@ -83,7 +92,7 @@ export async function POST(req) {
         'Content-Type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'mcp-client-2025-04-04', // MCP 커넥터 필수 헤더
+        'anthropic-beta': 'mcp-client-2025-04-04',
       },
       body: JSON.stringify({
         model: ANSWER_MODEL,
@@ -91,7 +100,6 @@ export async function POST(req) {
         stream: true,
         system: systemPrompt,
         messages: messages.slice(-4).map(({ role, content }) => ({ role, content })),
-        // 도구 제한 없음 — claude.ai처럼 17개 도구 전부 사용 가능
         mcp_servers: [{
           type: 'url',
           url: MCP_URL,
@@ -130,8 +138,7 @@ export async function POST(req) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          // ★ 핵심 수정: 어떤 바이트든(ping·도구입력·결과 등) 오면 "서버 살아있음" → idle 리셋
-          //    도구가 오래 조회 중이어도 ping이 흐르는 한 절대 헛발동하지 않음
+          // 어떤 바이트든(ping·도구입력·결과 등) 오면 idle 리셋
           resetIdle();
 
           buffer += decoder.decode(value, { stream: true });
@@ -185,12 +192,11 @@ export async function POST(req) {
           'data: ' + JSON.stringify({ done: true, full: fullText }) + '\n\n'
         ));
       } catch (e) {
-        // abortReason으로 idle/total/기타 구분
         let msg;
         if (abortReason === 'IDLE') {
-          msg = '법령 서버 응답이 끊겨 중단했습니다(연결 무응답). 잠시 후 다시 시도해 주세요.';
+          msg = '법령 서버 응답이 끊겼습니다(연결 무응답). 잠시 후 다시 시도해 주세요.';
         } else if (abortReason === 'TOTAL') {
-          msg = '질문이 복잡해 처리 시간이 초과됐습니다. 질문을 나눠서 다시 시도해 주세요.';
+          msg = '처리 시간이 초과됐습니다. 질문을 나눠서 다시 시도해 주세요.';
         } else {
           msg = e.message;
         }
