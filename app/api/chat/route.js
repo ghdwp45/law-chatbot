@@ -22,7 +22,7 @@ const TOTAL_TIMEOUT_MS = 240000;
 const MAX_STEPS = 12;
 const REWRITE_STEPS = 5;
 // 과탐색 가드: search_decisions 누적 호출 상한(매칭 데이터 없는 쟁점의 무한 재검색 방지).
-const MAX_DECISION_SEARCHES = Number(process.env.MAX_DECISION_SEARCHES || 12);
+const MAX_DECISION_SEARCHES = Number(process.env.MAX_DECISION_SEARCHES || 8);
 // 레이트리밋 가드: 법제처 API 429가 누적되면 재시도 루프를 끊고 현재 근거로 강제 합성.
 const MAX_RATE_LIMIT_HITS = Number(process.env.MAX_RATE_LIMIT_HITS || 5);
 const MAX_TOOL_RESULT_CHARS = 16000;
@@ -542,6 +542,7 @@ export async function POST(req) {
         lawTextTruncated: false,
         truncated: false,
         rateLimited: 0,
+        decisionSearchStarted: 0,
         calls: [],
         errors: [],
         decisionIds: new Set(),
@@ -552,14 +553,18 @@ export async function POST(req) {
         if (!activeAllowed.has(name)) return { __error: true, message: `서버에서 사용 불가한 도구(${name})` };
         // 과탐색 가드: 매칭 데이터가 없는 쟁점에서 search_decisions가 무한 반복돼 런타임이 폭주하는 것 방지.
         // 데이터가 있는 질문은 보통 초반에 찾으므로 정상 리서치엔 영향 없음(env로 조정).
-        if (name === 'search_decisions' && stats.decisionSearchAttempted >= MAX_DECISION_SEARCHES) {
-          return {
-            isError: false,
-            content: [{
-              type: 'text',
-              text: `[검색 한도 도달] search_decisions 호출이 ${MAX_DECISION_SEARCHES}회를 넘었습니다. 더 검색하지 말고, 지금까지 확인된 법령·근거만으로 즉시 ===해설=== / ===관련법령=== 형식에 맞춰 최종 답변을 작성하세요. 관련 예규·심판례를 못 찾은 부분은 '현재 조회 범위에서는 확인하지 못함'으로 보류하세요.`,
-            }],
-          };
+        if (name === 'search_decisions') {
+          // 병렬 호출 오버슈트 방지: 시작 시점에 즉시 카운트(증가는 동기적으로 일어남)
+          if (stats.decisionSearchStarted >= MAX_DECISION_SEARCHES) {
+            return {
+              isError: false,
+              content: [{
+                type: 'text',
+                text: `[검색 한도 도달] search_decisions 호출이 ${MAX_DECISION_SEARCHES}회에 도달했습니다. 더 검색하지 말고, 지금까지 확인된 법령·근거만으로 즉시 ===해설=== / ===관련법령=== 형식에 맞춰 최종 답변을 작성하세요. 관련 예규·심판례를 못 찾은 부분은 '현재 조회 범위에서는 확인하지 못함'으로 보류하세요.`,
+              }],
+            };
+          }
+          stats.decisionSearchStarted += 1;
         }
         const verr = validateToolInput(name, input);
         if (verr) return { __error: true, message: verr };
@@ -822,16 +827,22 @@ export async function POST(req) {
           send({ revising: true });
           const reasons = [...new Set([...judge.reasons, ...det.fatal, ...softReasons])];
           if (softReasons.length) judge.requireDecisionLookup = true;
+          // 이미 검색을 다 한 상태면(데이터 없음) rewrite에서 재검색해도 헛돔 →
+          // 재검색 강제 끄고, 도구 없이 현재 근거로 빠르게 재작성(2스텝). 이게 208초의 핵심 비용.
+          const searchExhausted = stats.decisionSearchAttempted >= MAX_DECISION_SEARCHES;
+          if (searchExhausted) judge.requireDecisionLookup = false;
           const reviseMsg =
             `직전 답변에 다음 문제가 있어 재작성이 필요합니다:\n- ${reasons.join('\n- ')}\n\n` +
             `${judge.instructions ? judge.instructions + '\n' : ''}` +
             `${judge.requireDecisionLookup ? '특히 적법성·공급시기 등 해석 쟁점이므로 search_decisions(interpretation·nts·tax_tribunal·precedent)와 get_decision_text로 관련 예규·심판례를 반드시 조회한 뒤, 도구로 확인한 사건·예규번호만 인용하라.\n' : ''}` +
+            `${searchExhausted ? '이미 여러 키워드·도메인으로 충분히 검색했으나 추가 자료를 찾지 못했다. 추가 도구 호출(검색·조회) 없이 현재까지 확보된 근거만으로, 못 찾은 부분은 보류로 명시하며 재작성하라.\n' : ''}` +
             `핵심 결론은 상세 해설·확인된 근거와 일치시키고, 지정된 ===해설=== / ===관련법령=== 형식을 지켜 한국어로 다시 작성하라.`;
 
           convo.push({ role: 'assistant', content: answerText });
           convo.push({ role: 'user', content: reviseMsg });
 
-          const second = await generate(REWRITE_STEPS);
+          // 검색 소진 시엔 도구 없이 정리만 하면 되므로 스텝을 2로 묶어 빠르게 종료
+          const second = await generate(searchExhausted ? 2 : REWRITE_STEPS);
           if (second.answerText) answerText = second.answerText;
           mark('rewrite done');
         }
