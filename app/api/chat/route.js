@@ -452,6 +452,7 @@ export async function POST(req) {
         lawTextTruncated: false,
         truncated: false,
         calls: [],
+        errors: [],
         decisionIds: new Set(),
         evidence: '',
       };
@@ -463,8 +464,14 @@ export async function POST(req) {
         try {
           return await mcpClient.callTool({ name, arguments: input }, undefined, { timeout: TOOL_TIMEOUT_MS });
         } catch (e) {
-          console.error('[ERROR] 도구 실패:', name, e.message);
-          return { __error: true, message: `${name} 조회 실패로 건너뜀` };
+          const timeout = e?.name === 'TimeoutError' || /timeout|aborted/i.test(e?.message || '');
+          console.error('[ERROR] 도구 실패:', name, e?.name, e?.message);
+          return {
+            __error: true,
+            message: `${name} 조회 실패로 건너뜀`,
+            detail: maskSecrets(e?.message || String(e)).slice(0, 200),
+            timeout,
+          };
         }
       }
 
@@ -553,6 +560,14 @@ export async function POST(req) {
               }
               stats.attempted += 1;
               stats.calls.push({ name: tu.name, cls });
+              if (cls === 'error') {
+                stats.errors.push({
+                  name: tu.name,
+                  domain: tu.input?.domain,
+                  timeout: !!r?.timeout,
+                  detail: (r?.detail || text || '').slice(0, 160),
+                });
+              }
               if (truncated) stats.truncated = true;
               if (tu.name === 'search_decisions') {
                 stats.decisionSearchAttempted += 1;
@@ -724,6 +739,8 @@ export async function POST(req) {
             empty: stats.calls.filter((c) => c.cls === 'empty').length,
             error: stats.calls.filter((c) => c.cls === 'error').length,
           },
+          timeouts: stats.errors.filter((e) => e.timeout).length,
+          errSample: stats.errors.slice(0, 8),
           law: stats.lawTextSucceeded, dec: stats.decisionTextSucceeded,
           decSearch: stats.decisionSearchAttempted, domains: [...stats.domainsSearched],
           judgeRan: needsJudge, judge: judge.action, rewrote: needRewrite, fatal, truncated: truncatedOut,
