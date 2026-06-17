@@ -23,9 +23,11 @@ const MAX_STEPS = 12;
 const REWRITE_STEPS = Number(process.env.REWRITE_STEPS || 3);
 // 벽시계 예산: 네트워크 경로(프록시/엣지)의 총 연결시간 한도 안에 답변을 끝내기 위한 안전장치.
 // 이 시간을 넘기면 추가 도구 호출을 멈추고 수집된 근거로 즉시 최종 답변을 합성한다.
-const FINALIZE_AFTER_MS = Number(process.env.FINALIZE_AFTER_MS || 100000);
+const FINALIZE_AFTER_MS = Number(process.env.FINALIZE_AFTER_MS || 75000);
 // 이 시간을 넘겼으면 재작성(추가 도구 루프)을 시작하지 않는다(첫 답변 + 검증 경고로 마무리).
-const REWRITE_MAX_START_MS = Number(process.env.REWRITE_MAX_START_MS || 115000);
+const REWRITE_MAX_START_MS = Number(process.env.REWRITE_MAX_START_MS || 85000);
+// 이 시간을 넘겼으면 judge(추가 LLM 검증)도 생략한다(전달 우선; 결정적 게이트는 유지).
+const JUDGE_MAX_START_MS = Number(process.env.JUDGE_MAX_START_MS || 90000);
 const MAX_TOOL_RESULT_CHARS = 16000;
 const EVIDENCE_BUDGET = 24000;
 const EVIDENCE_PER_CALL = 6000;
@@ -697,11 +699,15 @@ export async function POST(req) {
         }
 
         // judge 조건부 실행 + 모델 분기 (저위험·근거충분·형식정상일 때만 생략)
+        // 단, 시간 예산 초과 시엔 judge도 생략(전달 우선) — 결정적 게이트는 그대로 유지된다.
         send({ status: 'verifying' });
-        const needsJudge = shouldRunJudge(answerText, stats, det, softReasons);
+        const judgeWithinBudget = Date.now() - startedAt < JUDGE_MAX_START_MS;
+        const wantJudge = shouldRunJudge(answerText, stats, det, softReasons);
+        const needsJudge = judgeWithinBudget && wantJudge;
+        const judgeSkippedForBudget = wantJudge && !judgeWithinBudget;
         const judge = needsJudge
           ? await runJudge(lastUserMsg, answerText, pickJudgeModel(stats, det))
-          : { action: 'pass', reasons: ['저위험·근거충분으로 judge 생략'], requireDecisionLookup: false, instructions: '' };
+          : { action: 'pass', reasons: [judgeSkippedForBudget ? '시간 예산 초과로 judge 생략' : '저위험·근거충분으로 judge 생략'], requireDecisionLookup: false, instructions: '' };
         mark('judge done');
 
         const overBudget = Date.now() - startedAt > REWRITE_MAX_START_MS;
@@ -746,6 +752,9 @@ export async function POST(req) {
         }
         if (isHighRiskLegalQuestion(stats.question) && stats.decisionSearchAttempted === 0) {
           warnings.push('예규·심판례 미조회 — 법령 문언만으로 도출된 결론이므로 단정에 주의');
+        }
+        if (judgeSkippedForBudget) {
+          warnings.push('시간 제약으로 추가 정합성 검증(judge)을 생략함 — 결론은 참고용으로 원문 확인 권장');
         }
         if (fatal.length) {
           answerText = blockedAnswer(fatal);
