@@ -21,6 +21,8 @@ const TOOL_TIMEOUT_MS = 20000;
 const TOTAL_TIMEOUT_MS = 240000;
 const MAX_STEPS = 12;
 const REWRITE_STEPS = 5;
+// 과탐색 가드: search_decisions 누적 호출 상한(매칭 데이터 없는 쟁점의 무한 재검색 방지).
+const MAX_DECISION_SEARCHES = Number(process.env.MAX_DECISION_SEARCHES || 12);
 const MAX_TOOL_RESULT_CHARS = 16000;
 const EVIDENCE_BUDGET = 24000;
 const EVIDENCE_PER_CALL = 6000;
@@ -545,6 +547,17 @@ export async function POST(req) {
 
       async function runTool(name, input) {
         if (!activeAllowed.has(name)) return { __error: true, message: `서버에서 사용 불가한 도구(${name})` };
+        // 과탐색 가드: 매칭 데이터가 없는 쟁점에서 search_decisions가 무한 반복돼 런타임이 폭주하는 것 방지.
+        // 데이터가 있는 질문은 보통 초반에 찾으므로 정상 리서치엔 영향 없음(env로 조정).
+        if (name === 'search_decisions' && stats.decisionSearchAttempted >= MAX_DECISION_SEARCHES) {
+          return {
+            isError: false,
+            content: [{
+              type: 'text',
+              text: `[검색 한도 도달] search_decisions 호출이 ${MAX_DECISION_SEARCHES}회를 넘었습니다. 더 검색하지 말고, 지금까지 확인된 법령·근거만으로 즉시 ===해설=== / ===관련법령=== 형식에 맞춰 최종 답변을 작성하세요. 관련 예규·심판례를 못 찾은 부분은 '현재 조회 범위에서는 확인하지 못함'으로 보류하세요.`,
+            }],
+          };
+        }
         const verr = validateToolInput(name, input);
         if (verr) return { __error: true, message: verr };
         try {
