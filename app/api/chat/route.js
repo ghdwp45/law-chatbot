@@ -204,14 +204,51 @@ function extractToolText(r) {
   return text;
 }
 
+// 사용자 메시지 content를 문자열로 정규화.
+// content가 배열(Anthropic 콘텐츠 블록)이면 String()이 '[object Object]'가 되어
+// 고위험/세무 판별 정규식이 빗나가므로 반드시 텍스트로 평탄화한다.
+function messageContentToText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (p?.type === 'text' && p.text) return p.text;
+        if (p?.text) return p.text;
+        return '';
+      })
+      .join('\n')
+      .trim();
+  }
+  if (content && typeof content === 'object') {
+    if (content.text) return String(content.text);
+    return '';
+  }
+  return '';
+}
+
 function isToolSuccess(r) {
   if (!r || r.__error || r.isError) return false;
   return extractToolText(r).length > 0;
 }
 
+// MCP가 "검색 결과 없음(0건)"을 isError로 내려보내므로, 이를 장애와 구분한다.
+// 법률·예규 검색에서 0건은 매우 흔한 정상 결과 → error가 아니라 empty로 처리.
+function isNotFoundResult(r) {
+  if (!r) return false;
+  const msg = String(r.message || r.detail || extractToolText(r) || '');
+  return (
+    /\[NOT_FOUND\]/i.test(msg) ||
+    /검색\s*결과가?\s*없습니다/.test(msg) ||
+    /자료가\s*없습니다/.test(msg) ||
+    /결과\s*0\s*건/.test(msg)
+  );
+}
+
 // 도구 결과 3분류: error(서버오류) / empty(정상 처리·결과 0건) / ok(내용 있음).
 // 빈 결과를 error와 구분해 모델에 명확히 알려주면 무의미한 재검색을 줄인다.
 function classifyToolResult(r) {
+  if (isNotFoundResult(r)) return 'empty';   // NOT_FOUND/0건은 정상 빈 결과
   if (!r || r.__error || r.isError) return 'error';
   return extractToolText(r).length > 0 ? 'ok' : 'empty';
 }
@@ -281,6 +318,13 @@ function hasConclusionContradiction(answerText) {
 // 고위험 해석쟁점(적법성·공급시기·가산세 등) 질문 판별
 function isHighRiskLegalQuestion(q) {
   return /(적법|위법|허용|가능한가|가능한지|가산세|공급시기|귀속시기|과세대상|월합계|1역월|역월|세금계산서|신고|공제|불공제)/.test(
+    String(q)
+  );
+}
+
+// 세무 질문 판별 — 세무 쟁점은 judge(정합성 검증)를 보수적으로 태운다.
+function isTaxQuestion(q) {
+  return /(법인세|소득세|부가가치세|상속세|증여세|조세|세액공제|손금|익금|원천징수|세금계산서|신고|납부|가산세|외국납부세액|간접외국납부|익금불산입|손금불산입|감면|비과세|과세표준|세율)/.test(
     String(q)
   );
 }
@@ -371,6 +415,7 @@ function cloneWithLastMessageCache(messages) {
 function shouldRunJudge(answerText, stats, det, softReasons) {
   if (!answerText?.trim()) return true;
   if (isHighRiskLegalQuestion(stats.question)) return true;
+  if (isTaxQuestion(stats.question)) return true;
   if (det.fatal.length || det.warnings.length) return true;
   if (softReasons.length) return true;
   if (hasConclusionContradiction(answerText)) return true;
@@ -388,7 +433,8 @@ function pickJudgeModel(stats, det) {
 
 export async function POST(req) {
   const { messages } = await req.json();
-  const lastUserMsg = messages.filter((m) => m.role === 'user').at(-1)?.content || '';
+  const lastUserContent = messages.filter((m) => m.role === 'user').at(-1)?.content || '';
+  const lastUserMsg = messageContentToText(lastUserContent);
   console.log('[DEBUG] OC:', LAW_OC ? `set(len=${LAW_OC.length})` : '❌ MISSING');
   if (!IS_PROD) console.log('[DEBUG] 질문 길이:', String(lastUserMsg).length);
 
@@ -559,11 +605,13 @@ export async function POST(req) {
               let { text, truncated } = toToolResultText(r);
               // 결과 0건은 에러가 아니라 '정상 처리·자료 없음'임을 모델에 명시 → 동일조건 재검색 방지
               if (cls === 'empty') {
-                text = `[검색 결과 0건] '${tu.name}'가 정상 처리됐으나 해당 조건에 맞는 자료가 없습니다. 같은 조건으로 재검색하지 말고, 키워드/도메인을 바꾸거나 현재까지 확인된 근거로 진행하세요.`;
+                const dom = tu.input?.domain ? ` domain=${tu.input.domain}` : '';
+                const q = tu.input?.query ? ` query="${tu.input.query}"` : '';
+                text = `[검색 결과 0건]${dom}${q} 해당 조건에 맞는 자료가 없습니다(서버 정상, 데이터 없음). 같은 조건으로 재검색하지 말고, 키워드를 더 넓히거나 다른 도메인으로 검색하거나 현재까지 확인된 근거로 진행하세요.`;
                 truncated = false;
               }
               stats.attempted += 1;
-              stats.calls.push({ name: tu.name, cls });
+              stats.calls.push({ name: tu.name, cls, domain: tu.input?.domain, query: tu.input?.query });
               if (cls === 'error') {
                 stats.errors.push({
                   name: tu.name,
