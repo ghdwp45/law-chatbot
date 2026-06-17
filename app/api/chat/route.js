@@ -71,7 +71,10 @@ const TOOL_DEFS = [
       'precedent:법원판례 / interpretation:기재부 법령해석·예규 / tax_tribunal:조세심판원 / customs:관세 / nts:국세청 회신해석 / ' +
       'constitutional:헌재 / admin_appeal:행정심판 / ftc:공정위 / treaty:조세조약 등. ' +
       '세무 질문은 대개 precedent·interpretation·tax_tribunal·nts·constitutional·customs·treaty 중에서 고른다. ' +
-      '도메인별 세부 필터는 options 객체 안에 넣는다.',
+      '도메인별 세부 필터는 options 객체 안에 넣는다. ' +
+      '검색어(query)는 핵심 명사 1~2개로 짧게 넣을 것(예: "월합계 세금계산서"). ' +
+      '긴 문장이나 날짜·기간 등 여러 조건을 붙이면 법제처 API가 0건을 반환하므로, 넓은 키워드로 먼저 검색해 결과를 좁힌다. ' +
+      '같거나 유사한 키워드로 3회 이상 반복 검색하지 말고, 0건이면 키워드를 더 넓히거나 다른 도메인을 시도한다.',
     input_schema: {
       type: 'object',
       properties: {
@@ -95,7 +98,8 @@ const TOOL_DEFS = [
   },
   {
     name: 'get_decision_text',
-    description: '검색으로 찾은 판례/해석례/심판례의 전문을 조회해 사건번호·예규번호를 정확히 확인한다. 판례·예규를 인용하려면 가급적 이 도구로 전문을 확인할 것.',
+    description: '검색으로 찾은 판례/해석례/심판례의 전문을 조회해 사건번호·예규번호를 정확히 확인한다. 판례·예규를 인용하려면 가급적 이 도구로 전문을 확인할 것. ' +
+      '단, nts(국세청 법령해석) 도메인은 법제처 OPEN API에서 본문(전문) 조회를 지원하지 않으므로 nts에는 이 도구를 호출하지 말고, search_decisions 목록에서 확인된 정보(제목·일련번호 등)만 인용한다.',
     input_schema: {
       type: 'object',
       properties: {
