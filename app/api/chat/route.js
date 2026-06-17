@@ -373,6 +373,23 @@ function blockedAnswer(reasons) {
   );
 }
 
+// 형식 마커가 빠진 답변을 지정 형식으로 감싸 살린다.
+// (모델이 형식을 빠뜨렸다고 실제 조사한 답변을 통째로 폐기하지 않기 위함)
+function ensureAnswerFormat(answerText) {
+  let t = String(answerText || '').trim();
+  if (!t) return answerText;
+  const hasExplain = t.includes('===해설===') && t.includes('===해설끝===');
+  const hasLaw = t.includes('===관련법령===') && t.includes('===관련법령끝===');
+  if (hasExplain && hasLaw) return answerText;
+  if (!hasExplain) {
+    t = `===해설===\n# 📖 상세 해설\n${t}\n===해설끝===`;
+  }
+  if (!hasLaw) {
+    t = `${t}\n\n===관련법령===\n법령명|조문번호|설명\n===관련법령끝===`;
+  }
+  return t;
+}
+
 // LLM-judge 출력 파싱 (실패 시 fail-open=pass, 결정적 게이트가 여전히 방어)
 function parseJudge(text) {
   try {
@@ -789,8 +806,15 @@ export async function POST(req) {
           mark('rewrite done');
         }
 
+        // 형식 누락만으로 실제 답변을 폐기하지 않도록 살린다(형식 마커 자동 보정).
+        const formatWasMissing = !(answerText.includes('===해설===') && answerText.includes('===관련법령끝==='));
+        answerText = ensureAnswerFormat(answerText);
+
         // 최종 결정적 게이트 (재작성 후에도 잔존하는 결함만 차단, 나머지는 경고)
         const { fatal, warnings } = evaluateIntegrity(answerText, stats);
+        if (formatWasMissing) {
+          warnings.push('답변이 지정 형식을 벗어나 자동 보정함 — 내용 확인 권장');
+        }
         if (hasConclusionContradiction(answerText)) {
           warnings.unshift('핵심 결론이 본문 판단과 모순될 수 있음 — 결론보다 상세 해설의 근거를 우선 확인하십시오');
         }
