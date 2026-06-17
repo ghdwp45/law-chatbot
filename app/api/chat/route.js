@@ -23,6 +23,8 @@ const MAX_STEPS = 12;
 const REWRITE_STEPS = 5;
 // 과탐색 가드: search_decisions 누적 호출 상한(매칭 데이터 없는 쟁점의 무한 재검색 방지).
 const MAX_DECISION_SEARCHES = Number(process.env.MAX_DECISION_SEARCHES || 12);
+// 레이트리밋 가드: 법제처 API 429가 누적되면 재시도 루프를 끊고 현재 근거로 강제 합성.
+const MAX_RATE_LIMIT_HITS = Number(process.env.MAX_RATE_LIMIT_HITS || 5);
 const MAX_TOOL_RESULT_CHARS = 16000;
 const EVIDENCE_BUDGET = 24000;
 const EVIDENCE_PER_CALL = 6000;
@@ -539,6 +541,7 @@ export async function POST(req) {
         domainsSearched: new Set(),
         lawTextTruncated: false,
         truncated: false,
+        rateLimited: 0,
         calls: [],
         errors: [],
         decisionIds: new Set(),
@@ -564,12 +567,14 @@ export async function POST(req) {
           return await mcpClient.callTool({ name, arguments: input }, undefined, { timeout: TOOL_TIMEOUT_MS });
         } catch (e) {
           const timeout = e?.name === 'TimeoutError' || /timeout|aborted/i.test(e?.message || '');
+          const rateLimited = /too many requests|rate.?limit|429/i.test(e?.message || '');
           console.error('[ERROR] 도구 실패:', name, e?.name, e?.message);
           return {
             __error: true,
             message: `${name} 조회 실패로 건너뜀`,
             detail: maskSecrets(e?.message || String(e)).slice(0, 200),
             timeout,
+            rateLimited,
           };
         }
       }
@@ -615,6 +620,12 @@ export async function POST(req) {
       async function generate(maxSteps) {
         for (let step = 0; step < maxSteps; step++) {
           if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
+          // 레이트리밋 누적: 재시도 루프로 240초 abort되지 않도록 현재 근거로 강제 합성
+          if (stats.rateLimited >= MAX_RATE_LIMIT_HITS) {
+            console.warn('[WARN] rate-limit 누적으로 강제 합성:', stats.rateLimited);
+            send({ synthesizing: true });
+            return await synthesize();
+          }
           const signal = AbortSignal.timeout(Math.max(1000, deadline - Date.now()));
 
           const ms = anthropic.messages.stream(
@@ -652,6 +663,12 @@ export async function POST(req) {
               const cls = classifyToolResult(r);
               const success = cls === 'ok';
               let { text, truncated } = toToolResultText(r);
+              // 법제처 API 호출 한도(429): 재시도해도 또 막히므로 모델에 중단·합성을 지시
+              if (r?.rateLimited) {
+                stats.rateLimited += 1;
+                text = `[호출 한도 초과] 법제처 API 호출이 일시적으로 제한됩니다(429). 추가 조회를 멈추고, 지금까지 확보된 근거만으로 ===해설=== / ===관련법령=== 형식에 맞춰 최종 답변을 작성하세요. 부족한 부분은 '현재 조회 범위에서는 확인하지 못함'으로 보류하세요.`;
+                truncated = false;
+              }
               // 결과 0건은 에러가 아니라 '정상 처리·자료 없음'임을 모델에 명시 → 동일조건 재검색 방지
               if (cls === 'empty') {
                 const dom = tu.input?.domain ? ` domain=${tu.input.domain}` : '';
