@@ -205,6 +205,13 @@ function isToolSuccess(r) {
   return extractToolText(r).length > 0;
 }
 
+// 도구 결과 3분류: error(서버오류) / empty(정상 처리·결과 0건) / ok(내용 있음).
+// 빈 결과를 error와 구분해 모델에 명확히 알려주면 무의미한 재검색을 줄인다.
+function classifyToolResult(r) {
+  if (!r || r.__error || r.isError) return 'error';
+  return extractToolText(r).length > 0 ? 'ok' : 'empty';
+}
+
 function toToolResultText(r) {
   if (r && r.__error) return { text: `조회 실패: ${r.message}`, truncated: false };
   const raw = extractToolText(r);
@@ -536,10 +543,16 @@ export async function POST(req) {
           const results = await Promise.all(
             toolUses.map(async (tu) => {
               const r = await runTool(tu.name, tu.input);
-              const success = isToolSuccess(r);
-              const { text, truncated } = toToolResultText(r);
+              const cls = classifyToolResult(r);
+              const success = cls === 'ok';
+              let { text, truncated } = toToolResultText(r);
+              // 결과 0건은 에러가 아니라 '정상 처리·자료 없음'임을 모델에 명시 → 동일조건 재검색 방지
+              if (cls === 'empty') {
+                text = `[검색 결과 0건] '${tu.name}'가 정상 처리됐으나 해당 조건에 맞는 자료가 없습니다. 같은 조건으로 재검색하지 말고, 키워드/도메인을 바꾸거나 현재까지 확인된 근거로 진행하세요.`;
+                truncated = false;
+              }
               stats.attempted += 1;
-              stats.calls.push({ name: tu.name, success });
+              stats.calls.push({ name: tu.name, cls });
               if (truncated) stats.truncated = true;
               if (tu.name === 'search_decisions') {
                 stats.decisionSearchAttempted += 1;
@@ -593,7 +606,7 @@ export async function POST(req) {
 
         const judgeUser =
           `[질문]\n${String(question).slice(0, 3000)}\n\n` +
-          `[도구 호출 요약]\n${stats.calls.map((c) => `${c.name}:${c.success ? '성공' : '실패'}`).join(', ') || '(없음)'}\n\n` +
+          `[도구 호출 요약]\n${stats.calls.map((c) => `${c.name}:${c.cls === 'ok' ? '성공' : c.cls === 'empty' ? '결과없음' : '오류'}`).join(', ') || '(없음)'}\n\n` +
           `[확보된 근거(발췌)]\n${stats.evidence.slice(0, EVIDENCE_BUDGET) || '(없음)'}\n\n` +
           `[검증 대상 답변]\n${answer}`;
 
@@ -705,7 +718,12 @@ export async function POST(req) {
         }
 
         console.log('[INFO] 요약:', JSON.stringify({
-          calls: stats.calls.map((c) => `${c.name}:${c.success ? 'O' : 'X'}`),
+          calls: stats.calls.map((c) => `${c.name}:${c.cls === 'ok' ? 'O' : c.cls === 'empty' ? '-' : 'X'}`),
+          toolDiag: {
+            ok: stats.calls.filter((c) => c.cls === 'ok').length,
+            empty: stats.calls.filter((c) => c.cls === 'empty').length,
+            error: stats.calls.filter((c) => c.cls === 'error').length,
+          },
           law: stats.lawTextSucceeded, dec: stats.decisionTextSucceeded,
           decSearch: stats.decisionSearchAttempted, domains: [...stats.domainsSearched],
           judgeRan: needsJudge, judge: judge.action, rewrote: needRewrite, fatal, truncated: truncatedOut,
