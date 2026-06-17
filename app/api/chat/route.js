@@ -463,6 +463,7 @@ export async function POST(req) {
 
       const convo = messages.slice(-8).map(({ role, content }) => ({ role, content }));
       let truncatedOut = false;
+      let heartbeat = null;
 
       function logUsage(label, usage) {
         if (IS_PROD || !usage) return;
@@ -631,6 +632,11 @@ export async function POST(req) {
       }
 
       try {
+        // SSE 연결 유지용 heartbeat: 긴 침묵 구간에 프록시/브라우저가 idle 연결을 끊는 것 방지.
+        // 주석(:) 라인이라 클라이언트 SSE 파서는 무시한다.
+        heartbeat = setInterval(() => {
+          try { controller.enqueue(enc.encode(': ping\n\n')); } catch {}
+        }, 10000);
         send({ status: 'drafting' });
         let { answerText } = await generate(MAX_STEPS);
         mark('generate done');
@@ -717,6 +723,7 @@ export async function POST(req) {
         console.error('[ERROR] 루프:', e.name, maskSecrets(e.message));
         send({ error: msg });
       } finally {
+        if (heartbeat) clearInterval(heartbeat);
         if (mcpConnected) await mcpClient.close().catch(() => {});
         controller.close();
       }
