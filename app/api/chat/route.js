@@ -20,7 +20,12 @@ const EARLY_STOP_HINT = process.env.EARLY_STOP_HINT === 'true';
 const TOOL_TIMEOUT_MS = 20000;
 const TOTAL_TIMEOUT_MS = 240000;
 const MAX_STEPS = 12;
-const REWRITE_STEPS = 5;
+const REWRITE_STEPS = Number(process.env.REWRITE_STEPS || 3);
+// 벽시계 예산: 네트워크 경로(프록시/엣지)의 총 연결시간 한도 안에 답변을 끝내기 위한 안전장치.
+// 이 시간을 넘기면 추가 도구 호출을 멈추고 수집된 근거로 즉시 최종 답변을 합성한다.
+const FINALIZE_AFTER_MS = Number(process.env.FINALIZE_AFTER_MS || 100000);
+// 이 시간을 넘겼으면 재작성(추가 도구 루프)을 시작하지 않는다(첫 답변 + 검증 경고로 마무리).
+const REWRITE_MAX_START_MS = Number(process.env.REWRITE_MAX_START_MS || 115000);
 const MAX_TOOL_RESULT_CHARS = 16000;
 const EVIDENCE_BUDGET = 24000;
 const EVIDENCE_PER_CALL = 6000;
@@ -520,6 +525,12 @@ export async function POST(req) {
       async function generate(maxSteps) {
         for (let step = 0; step < maxSteps; step++) {
           if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
+          // 벽시계 예산 초과: 추가 도구 호출 중단, 수집한 근거로 즉시 합성(답변 전달 보장)
+          if (Date.now() - startedAt > FINALIZE_AFTER_MS) {
+            if (!IS_PROD) console.log('[DEBUG] finalize(예산 초과):', Date.now() - startedAt, 'ms @step', step);
+            send({ synthesizing: true });
+            return await synthesize();
+          }
           const signal = AbortSignal.timeout(Math.max(1000, deadline - Date.now()));
 
           const ms = anthropic.messages.stream(
@@ -693,8 +704,10 @@ export async function POST(req) {
           : { action: 'pass', reasons: ['저위험·근거충분으로 judge 생략'], requireDecisionLookup: false, instructions: '' };
         mark('judge done');
 
+        const overBudget = Date.now() - startedAt > REWRITE_MAX_START_MS;
         const needRewrite =
-          judge.action === 'revise' || judge.action === 'block' || det.fatal.length > 0 || softReasons.length > 0;
+          (judge.action === 'revise' || judge.action === 'block' || det.fatal.length > 0 || softReasons.length > 0) &&
+          !overBudget;
 
         if (!IS_PROD) {
           console.log('[DEBUG] judge:', JSON.stringify({
@@ -708,10 +721,14 @@ export async function POST(req) {
           send({ revising: true });
           const reasons = [...new Set([...judge.reasons, ...det.fatal, ...softReasons])];
           if (softReasons.length) judge.requireDecisionLookup = true;
+          // 이미 여러 번 검색했는데도 근거를 못 찾았으면 추가 검색은 무의미 → 재검색 강제 해제(시간 낭비 방지)
+          const searchExhausted = stats.decisionSearchAttempted >= 8;
+          if (searchExhausted) judge.requireDecisionLookup = false;
           const reviseMsg =
             `직전 답변에 다음 문제가 있어 재작성이 필요합니다:\n- ${reasons.join('\n- ')}\n\n` +
             `${judge.instructions ? judge.instructions + '\n' : ''}` +
             `${judge.requireDecisionLookup ? '특히 적법성·공급시기 등 해석 쟁점이므로 search_decisions(interpretation·nts·tax_tribunal·precedent)와 get_decision_text로 관련 예규·심판례를 반드시 조회한 뒤, 도구로 확인한 사건·예규번호만 인용하라.\n' : ''}` +
+            `${searchExhausted ? '이미 여러 키워드·도메인으로 검색했으나 관련 예규·심판례를 찾지 못했다. 추가 검색하지 말고, 현재까지 확인된 법령·근거만으로 결론을 보류하거나 조건부로 명확히 작성하라.\n' : ''}` +
             `핵심 결론은 상세 해설·확인된 근거와 일치시키고, 지정된 ===해설=== / ===관련법령=== 형식을 지켜 한국어로 다시 작성하라.`;
 
           convo.push({ role: 'assistant', content: answerText });
