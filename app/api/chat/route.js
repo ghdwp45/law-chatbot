@@ -445,13 +445,32 @@ export async function POST(req) {
   const deadline = Date.now() + TOTAL_TIMEOUT_MS;
   const startedAt = Date.now();
   const mark = (label) => { if (!IS_PROD) console.log(`[TIME] ${label}: ${Date.now() - startedAt}ms`); };
+
+  // 진단: 클라이언트(브라우저/프록시)가 연결을 끊었는지 감지 — 캡 vs 코드 원인 구분용
+  let clientAborted = false;
+  req.signal?.addEventListener('abort', () => {
+    clientAborted = true;
+    console.warn('[CLIENT_ABORT]', Date.now() - startedAt, 'ms');
+  });
   const today = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date());
 
   const stream = new ReadableStream({
     async start(controller) {
-      const send = (obj) => controller.enqueue(enc.encode('data: ' + JSON.stringify(obj) + '\n\n'));
+      let seq = 0;
+      const send = (obj) => {
+        if (clientAborted) return false;
+        seq += 1;
+        try {
+          controller.enqueue(enc.encode('data: ' + JSON.stringify(obj) + '\n\n'));
+          return true;
+        } catch (e) {
+          clientAborted = true;
+          console.error('[SSE_SEND_FAIL]', seq, e.name, e.message, Date.now() - startedAt, 'ms');
+          return false;
+        }
+      };
 
       const mcpClient = new Client({ name: 'law-chatbot', version: '3.3.0' }, { capabilities: {} });
       let mcpConnected = false;
@@ -800,8 +819,13 @@ export async function POST(req) {
         }));
 
         if (truncatedOut) send({ truncated: true });
-        send({ text: answerText });
-        send({ done: true, full: answerText });
+        const okText = send({ text: answerText });
+        const okDone = send({ done: true, full: answerText });
+        // 진단: 최종 전송이 실제 enqueue됐는지 + abort 여부 (운영 로그에서 항상 보임)
+        console.log('[INFO] SSE:', JSON.stringify({
+          totalSends: seq, okText, okDone, aborted: clientAborted,
+          answerLen: answerText.length, finalMs: Date.now() - startedAt,
+        }));
       } catch (e) {
         const msg =
           e.message === 'TOTAL_TIMEOUT' || e.name === 'TimeoutError' || e.name === 'AbortError'

@@ -111,41 +111,56 @@ export default function Home() {
       readerRef.current = reader;
       const decoder = new TextDecoder();
       let fullText = "";
+      let buffer = "";
+
+      // 하나의 완결된 SSE 이벤트(여러 data: 줄 가능, ': ping' 주석 줄 제외)를 처리.
+      // OVERLOADED는 throw로 바깥 try/catch까지 전파한다.
+      const handleEvent = (evt) => {
+        const dataLines = evt.split("\n").filter(l => l.startsWith("data:"));
+        if (dataLines.length === 0) return; // ': ping' 등 주석/빈 이벤트
+        const json = dataLines.map(l => l.replace(/^data:\s?/, "")).join("");
+        if (!json) return;
+        let parsed;
+        try {
+          parsed = JSON.parse(json);
+        } catch {
+          return; // 비JSON/불완전 → 무시 (정상 이벤트는 버퍼로 완결됨)
+        }
+        if (parsed.text) {
+          fullText += parsed.text;
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { role: "assistant", content: fullText };
+            return updated;
+          });
+        }
+        if (parsed.done && parsed.full) {
+          const { explainText, links } = parseResponse(parsed.full);
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { role: "assistant", content: explainText };
+            return updated;
+          });
+          if (links.length > 0) setLawLinks(links);
+        }
+        if (parsed.error) {
+          const isOverloaded = parsed.error.toLowerCase().includes("overload");
+          throw new Error(isOverloaded ? "OVERLOADED" : parsed.error);
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter(l => l.startsWith("data: "));
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line.slice(6));
-            if (parsed.text) {
-              fullText += parsed.text;
-              setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = { role: "assistant", content: fullText };
-                return updated;
-              });
-            }
-            if (parsed.done && parsed.full) {
-              const { explainText, links } = parseResponse(parsed.full);
-              setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = { role: "assistant", content: explainText };
-                return updated;
-              });
-              if (links.length > 0) setLawLinks(links);
-            }
-            if (parsed.error) {
-              const isOverloaded = parsed.error.toLowerCase().includes("overload");
-              throw new Error(isOverloaded ? "OVERLOADED" : parsed.error);
-            }
-          } catch (innerE) {
-            if (innerE.message === "OVERLOADED") throw innerE;
-          }
-        }
+        // 청크를 누적: read()는 SSE 이벤트 경계와 무관하게 쪼개져 들어온다.
+        buffer += decoder.decode(value, { stream: true });
+        // 이벤트 경계는 빈 줄(\n\n). 마지막 미완성 조각은 버퍼에 남겨둔다.
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
+        for (const evt of parts) handleEvent(evt);
       }
+      // 스트림 종료 후 남은 완결 이벤트 처리
+      if (buffer.trim()) handleEvent(buffer);
     } catch (e) {
       const isOverloaded = e.message === "OVERLOADED" || e.message?.toLowerCase().includes("overload");
       const errMsg = isOverloaded
