@@ -413,6 +413,19 @@ function parseJudge(text) {
   }
 }
 
+// 재시도해도 해결되지 않는 인프라/계정 오류 판별 (한도·과금·인증·4xx·레이트리밋·중단 등).
+// judge가 이런 오류로 실패하면 rewrite로 같은 API를 또 호출해봐야 무의미하므로,
+// 이미 완성된 답변을 폐기·재작성하지 않고 경고와 함께 그대로 보존한다.
+function isInfraError(e) {
+  const msg = String(e?.message || e || '');
+  const status = e?.status ?? e?.statusCode;
+  return (
+    status === 400 || status === 401 || status === 403 || status === 429 ||
+    e?.name === 'AbortError' || e?.name === 'TimeoutError' ||
+    /usage limit|reached your specified|billing|credit balance|quota|invalid_request_error|authentication|permission_error|overloaded|rate.?limit|too many requests/i.test(msg)
+  );
+}
+
 // === 캐싱 헬퍼 =============================================================
 // 시스템 프롬프트에 cache_control 부여 (렌더 순서상 tools까지 함께 캐시됨).
 function buildCachedSystem(today) {
@@ -787,6 +800,10 @@ export async function POST(req) {
           return parsed;
         } catch (e) {
           console.error('[WARN] judge 실패(검증 생략):', e.name, e.message);
+          // 한도·과금·인증 등 재시도 무의미한 오류: rewrite로 또 호출하지 말고 답변 유지(경고는 최종 게이트에서).
+          if (isInfraError(e)) {
+            return { action: 'pass', reasons: ['judge 검증 일시 불가(API/한도 오류) — 답변 유지'], requireDecisionLookup: false, instructions: '' };
+          }
           if (isHighRiskLegalQuestion(question)) {
             return {
               action: 'revise',
@@ -840,6 +857,7 @@ export async function POST(req) {
           }));
         }
 
+        let rewriteFailed = false;
         if (needRewrite) {
           send({ status: 'revising' });
           send({ revising: true });
@@ -862,9 +880,17 @@ export async function POST(req) {
           convo.push({ role: 'user', content: reviseMsg });
 
           // 검색 소진 시엔 도구 없이 정리만 하면 되므로 스텝을 2로 묶어 빠르게 종료
-          const second = await generate(searchExhausted ? 2 : REWRITE_STEPS);
-          if (second.answerText) answerText = second.answerText;
-          mark('rewrite done');
+          try {
+            const second = await generate(searchExhausted ? 2 : REWRITE_STEPS);
+            if (second.answerText) answerText = second.answerText;
+            mark('rewrite done');
+          } catch (e) {
+            // 재작성 호출이 인프라/한도 오류로 실패해도 재작성 전 답변(answerText)을 보존.
+            // 멀쩡히 만든 답변을 에러 화면으로 덮어쓰지 않기 위함(바깥 catch로 전파하지 않음).
+            console.error('[WARN] rewrite 실패 — 재작성 전 답변 보존:', e.name, maskSecrets(e.message));
+            rewriteFailed = true;
+            send({ discardDraft: true });   // 재작성으로 흘렸을 수 있는 잠정 토큰 정리
+          }
         }
 
         // 형식 누락만으로 실제 답변을 폐기하지 않도록 살린다(형식 마커 자동 보정).
@@ -881,6 +907,12 @@ export async function POST(req) {
         }
         if (isHighRiskLegalQuestion(stats.question) && stats.decisionSearchAttempted === 0) {
           warnings.push('예규·심판례 미조회 — 법령 문언만으로 도출된 결론이므로 단정에 주의');
+        }
+        if (judge.reasons?.some((r) => r.includes('일시 불가'))) {
+          warnings.push('자동 정합성 검증을 완료하지 못함(일시적 API 오류) — 핵심 결론은 상세 해설 근거로 직접 확인 권장');
+        }
+        if (rewriteFailed) {
+          warnings.push('재작성 단계가 일시 오류로 중단되어 직전 답변을 그대로 제공함');
         }
         if (fatal.length) {
           answerText = blockedAnswer(fatal);
