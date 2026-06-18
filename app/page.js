@@ -110,11 +110,26 @@ export default function Home() {
       const reader = res.body.getReader();
       readerRef.current = reader;
       const decoder = new TextDecoder();
-      let fullText = "";
+      let streamBuf = "";   // 잠정(provisional) 스트리밍 버퍼: answerDelta 누적
       let buffer = "";
+
+      // 라이브 표시용 정리: 스트리밍 중엔 ===마커와 관련법령 블록을 숨겨 본문만 보여준다.
+      const liveExplain = (buf) => {
+        let t = buf;
+        const lawIdx = t.indexOf("===관련법령===");
+        if (lawIdx !== -1) t = t.slice(0, lawIdx);
+        return t.replace("===해설===", "").replace("===해설끝===", "").trim();
+      };
+      const renderLast = (content) => setMessages(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = { role: "assistant", content };
+        return updated;
+      });
 
       // 하나의 완결된 SSE 이벤트(여러 data: 줄 가능, ': ping' 주석 줄 제외)를 처리.
       // OVERLOADED는 throw로 바깥 try/catch까지 전파한다.
+      // 이벤트 계약: answerDelta=잠정 토큰(append) / discardDraft=잠정 폐기 /
+      //             text·done.full=최종 권위(치환). 최종본은 비스트리밍과 동일.
       const handleEvent = (evt) => {
         const dataLines = evt.split("\n").filter(l => l.startsWith("data:"));
         if (dataLines.length === 0) return; // ': ping' 등 주석/빈 이벤트
@@ -126,21 +141,25 @@ export default function Home() {
         } catch {
           return; // 비JSON/불완전 → 무시 (정상 이벤트는 버퍼로 완결됨)
         }
-        if (parsed.text) {
-          fullText += parsed.text;
-          setMessages(prev => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { role: "assistant", content: fullText };
-            return updated;
-          });
+        // 잠정 토큰: 라이브 프리뷰에 누적 렌더
+        if (parsed.answerDelta) {
+          streamBuf += parsed.answerDelta;
+          renderLast(liveExplain(streamBuf));
         }
+        // 잠정 폐기: 도구 호출 전 중간출력 또는 재작성 직전 → 버퍼 비우고 '조회 중' 표시로 복귀
+        if (parsed.discardDraft) {
+          streamBuf = "";
+          renderLast("");
+        }
+        // 최종 권위 텍스트(원본): 스트리밍분을 폐기하고 치환
+        if (parsed.text) {
+          streamBuf = "";
+          renderLast(liveExplain(parsed.text));
+        }
+        // 최종 완료: 형식 파싱 후 해설 본문으로 치환 + 관련법령 링크 표시
         if (parsed.done && parsed.full) {
           const { explainText, links } = parseResponse(parsed.full);
-          setMessages(prev => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { role: "assistant", content: explainText };
-            return updated;
-          });
+          renderLast(explainText);
           if (links.length > 0) setLawLinks(links);
         }
         if (parsed.error) {

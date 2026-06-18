@@ -598,8 +598,7 @@ export async function POST(req) {
       let heartbeat = null;
 
       function logUsage(label, usage) {
-        // 임시 진단: 프롬프트 캐시 적중 여부 확인을 위해 프로덕션에서도 1줄 로그(측정 후 IS_PROD 가드 복구).
-        if (!usage) return;
+        if (IS_PROD || !usage) return;
         console.log('[USAGE]', label, {
           input: usage.input_tokens,
           output: usage.output_tokens,
