@@ -1019,6 +1019,8 @@ export async function POST(req) {
           law: stats.lawTextSucceeded, dec: stats.decisionTextSucceeded,
           decSearch: stats.decisionSearchAttempted, domains: [...stats.domainsSearched],
           judgeRan: needsJudge, judge: judge.action, rewrote: needRewrite, fatal, truncated: truncatedOut,
+          // 진단: 재작성이 왜 트리거됐는지 운영 로그에서도 보이도록 사유를 남긴다.
+          judgeReasons: judge.reasons, soft: softReasons, rewriteFailed,
           totalMs: Date.now() - startedAt,
         }));
 
