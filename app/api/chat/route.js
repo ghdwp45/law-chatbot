@@ -184,7 +184,11 @@ ${earlyStop}
 
 ===관련법령===
 법령명|조문번호|설명
-===관련법령끝===`;
+===관련법령끝===
+
+[관련법령 작성 규칙]
+- 답변에서 인용한 법령·조문마다 정확히 한 줄씩, 반드시 '법령명|조문번호|설명' 형식(세로줄 | 로 구분)으로 적는다.
+- 머리글 줄·불릿·빈 블록을 쓰지 말 것. 인용한 법령이 하나라도 있으면 이 블록을 비워두지 않는다.`;
 }
 
 function maskSecrets(s) {
@@ -394,6 +398,40 @@ function ensureAnswerFormat(answerText) {
     t = `${t}\n\n===관련법령===\n법령명|조문번호|설명\n===관련법령끝===`;
   }
   return t;
+}
+
+// 관련법령 링크를 서버에서 파싱·검증해 구조화 데이터로 만든다.
+// 프론트가 done.full 문자열을 직접 파싱하지 않고 이 배열을 그대로 쓰도록 하기 위함(안정적 계약).
+// 구조화 블록(===관련법령===)이 비었으면 해설 본문에서 '법령명+조문' 인용을 추출하는 폴백을 둔다.
+function parseLawLinks(answerText) {
+  const text = String(answerText || '');
+  const links = [];
+  const seen = new Set();
+  const push = (lawName, articleNo, desc) => {
+    if (!lawName || !articleNo) return;
+    if (lawName === '법령명' && articleNo === '조문번호') return; // 형식 예시(자리표시) 줄 제외
+    const key = `${lawName}|${articleNo}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    links.push({ lawName, articleNo, desc: desc || '' });
+  };
+
+  const block = text.match(/===관련법령===([\s\S]*?)===관련법령끝===/)?.[1];
+  if (block) {
+    block.trim().split('\n').filter((l) => l.includes('|')).forEach((line) => {
+      const parts = line.split('|');
+      if (parts.length >= 2) push(parts[0].trim(), parts[1].trim(), parts[2]?.trim());
+    });
+  }
+
+  // 폴백: 구조화 블록이 비면 해설 본문에서 인용 법령을 추출(AI가 표를 안 채운 경우 대비).
+  if (links.length === 0) {
+    const body = text.match(/===해설===([\s\S]*?)===해설끝===/)?.[1] || text;
+    const re = /([가-힣]{2,}(?:법|법률|령|규칙|예규|고시|기준))\s*(제\d+조(?:의\d+)?)/g;
+    let m;
+    while ((m = re.exec(body)) !== null) push(m[1], m[2], '');
+  }
+  return links;
 }
 
 // LLM-judge 출력 파싱 (실패 시 fail-open=pass, 결정적 게이트가 여전히 방어)
@@ -986,7 +1024,9 @@ export async function POST(req) {
 
         if (truncatedOut) send({ truncated: true });
         const okText = send({ text: answerText });
-        const okDone = send({ done: true, full: answerText });
+        // 관련법령을 서버에서 파싱·검증해 구조화 배열로 함께 전송(프론트는 문자열 파싱 대신 이걸 사용).
+        const lawLinks = parseLawLinks(answerText);
+        const okDone = send({ done: true, full: answerText, lawLinks });
         // 진단: 최종 전송이 실제 enqueue됐는지 + abort 여부 (운영 로그에서 항상 보임)
         console.log('[INFO] SSE:', JSON.stringify({
           totalSends: seq, okText, okDone, aborted: clientAborted,

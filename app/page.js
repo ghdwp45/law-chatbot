@@ -33,19 +33,33 @@ export default function Home() {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, loading]);
 
+  // done.full 문자열에서 해설/관련법령을 파싱. (백엔드가 구조화 lawLinks를 보내면 그걸 우선 쓰고,
+  // 이 함수의 links는 구버전 백엔드 대비 폴백으로만 사용됨)
   const parseResponse = (text) => {
     const explainMatch = text.match(/===해설===([\s\S]*?)===해설끝===/);
     const lawMatch = text.match(/===관련법령===([\s\S]*?)===관련법령끝===/);
     const explainText = explainMatch ? explainMatch[1].trim() : text;
     const links = [];
+    const seen = new Set();
+    const push = (lawName, articleNo, desc) => {
+      if (!lawName || !articleNo) return;
+      if (lawName === "법령명" && articleNo === "조문번호") return; // 형식 예시(자리표시) 줄 제외
+      const key = `${lawName}|${articleNo}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      links.push({ lawName, articleNo, desc: desc || "" });
+    };
     if (lawMatch) {
-      const lines = lawMatch[1].trim().split("\n").filter(l => l.includes("|"));
-      lines.forEach(line => {
+      lawMatch[1].trim().split("\n").filter(l => l.includes("|")).forEach(line => {
         const parts = line.split("|");
-        if (parts.length >= 2) {
-          links.push({ lawName: parts[0].trim(), articleNo: parts[1].trim(), desc: parts[2]?.trim() || "" });
-        }
+        if (parts.length >= 2) push(parts[0].trim(), parts[1].trim(), parts[2]?.trim());
       });
+    }
+    // 폴백: 구조화 블록이 비면 해설 본문에서 '법령명 + 조문' 인용을 추출
+    if (links.length === 0 && explainText) {
+      const re = /([가-힣]{2,}(?:법|법률|령|규칙|예규|고시|기준))\s*(제\d+조(?:의\d+)?)/g;
+      let m;
+      while ((m = re.exec(explainText)) !== null) push(m[1], m[2], "");
     }
     return { explainText, links };
   };
@@ -171,8 +185,11 @@ export default function Home() {
         if (parsed.done && parsed.full) {
           const { explainText, links } = parseResponse(parsed.full);
           renderLast(explainText);
+          // 백엔드가 서버에서 검증한 구조화 lawLinks를 보내면 그걸 우선 사용(정공법).
+          // 없으면(구버전 백엔드) 문자열 파싱 결과를 폴백으로 사용.
           // 관련 법령이 없으면 빈 배열로 교체해, 이전 답변의 법령이 남지 않게 한다.
-          setLawLinks(links);
+          const finalLinks = Array.isArray(parsed.lawLinks) ? parsed.lawLinks : links;
+          setLawLinks(finalLinks);
         }
         if (parsed.error) {
           const isOverloaded = parsed.error.toLowerCase().includes("overload");
