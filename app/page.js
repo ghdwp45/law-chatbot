@@ -22,6 +22,7 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [revising, setRevising] = useState(false);   // 검증 후 재작성(다듬기) 중 표시
   const [lawLinks, setLawLinks] = useState([]);
   const [activeArticle, setActiveArticle] = useState(null);
   const chatRef = useRef(null);
@@ -102,6 +103,7 @@ export default function Home() {
       readerRef.current = null;
     }
     setLoading(false);
+    setRevising(false);   // 중단 시 '다듬는 중' 표시도 즉시 해제(옛 요청이 UI에 남지 않게)
   };
 
   const send = async (text) => {
@@ -110,6 +112,7 @@ export default function Home() {
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     setActiveArticle(null);
+    setRevising(false);
     setLawLinks([]);   // 새 질문 시작 시 이전 답변의 관련 법령을 비운다
 
     const newMessages = [...messages, { role: "user", content: userText }];
@@ -176,13 +179,18 @@ export default function Home() {
           streamBuf = "";
           renderLast("");
         }
+        // 재작성(다듬기) 시작: 원본 답변은 화면에 유지하고 "검증·보완 중"만 표시한다.
+        // (백엔드가 재작성 중에는 answerDelta/discardDraft를 보내지 않으므로 화면이 안 비워짐)
+        if (parsed.revising) setRevising(true);
         // 최종 권위 텍스트(원본): 스트리밍분을 폐기하고 치환
         if (parsed.text) {
           streamBuf = "";
+          setRevising(false);
           renderLast(liveExplain(parsed.text));
         }
         // 최종 완료: 형식 파싱 후 해설 본문으로 치환 + 관련법령 링크 표시
         if (parsed.done && parsed.full) {
+          setRevising(false);
           const { explainText, links } = parseResponse(parsed.full);
           renderLast(explainText);
           // 백엔드가 서버에서 검증한 구조화 lawLinks를 보내면 그걸 우선 사용(정공법).
@@ -223,6 +231,7 @@ export default function Home() {
     } finally {
       readerRef.current = null;
       setLoading(false);
+      setRevising(false);
     }
   };
 
@@ -314,6 +323,17 @@ export default function Home() {
                 <div style={s.avatarAi}>법</div>
                 <div style={s.typing}>
                   {[0,1,2].map(i => <span key={i} style={{...s.typingDot, animationDelay:`${i*0.2}s`}}/>)}
+                </div>
+              </div>
+            )}
+
+            {/* 재작성(검증 후 다듬기) 중: 위의 답변은 그대로 두고 상태만 표시 */}
+            {revising && (
+              <div style={{...s.msgRow, justifyContent: "flex-start"}}>
+                <div style={s.avatarAi}>법</div>
+                <div style={s.revising}>
+                  <span style={{...s.typingDot, animationDelay: "0s"}} />
+                  근거 검증 후 답변을 다듬는 중입니다…
                 </div>
               </div>
             )}
@@ -458,6 +478,7 @@ const s = {
   bubbleUser:{maxWidth:"calc(100% - 60px)",padding:"10px 14px",borderRadius:"10px 10px 3px 10px",background:"#1a1208",color:"#f5f0e8",fontSize:13,lineHeight:1.8},
   typing:{display:"flex",alignItems:"center",gap:4,padding:"10px 14px",background:"#fdfaf4",border:"1px solid #d4c9b0",borderRadius:"10px 10px 10px 3px"},
   typingDot:{width:6,height:6,background:"#7a6e60",borderRadius:"50%",display:"inline-block",animation:"blink 1.2s infinite"},
+  revising:{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:"#fdf6e3",border:"1px solid #e0d3a8",borderRadius:"10px 10px 10px 3px",fontSize:12,color:"#8a6d1a"},
   inputArea:{padding:"10px 14px 14px",background:"#ede6d6",borderTop:"1px solid #d4c9b0",flexShrink:0},
   inputRow:{display:"flex",gap:8,alignItems:"flex-end",background:"#fdfaf4",border:"1.5px solid #d4c9b0",borderRadius:10,padding:"7px 7px 7px 12px"},
   textarea:{flex:1,border:"none",outline:"none",background:"transparent",fontFamily:"'Noto Sans KR',sans-serif",fontSize:13,color:"#1a1208",resize:"none",maxHeight:120,minHeight:22,lineHeight:1.6},

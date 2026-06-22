@@ -18,9 +18,18 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 const EARLY_STOP_HINT = process.env.EARLY_STOP_HINT === 'true';
 
 const TOOL_TIMEOUT_MS = 20000;
-const TOTAL_TIMEOUT_MS = 240000;
+// 플랫폼 함수 한계(maxDuration=300s) 아래에서 최대한 확보. 답 전송·마무리 여유를 남긴다.
+const TOTAL_TIMEOUT_MS = 280000;
 const MAX_STEPS = 12;
 const REWRITE_STEPS = 5;
+// 재작성 시간 가드:
+//  - 남은 시간이 이 미만이면 재작성을 아예 건너뛰고 원본+경고로 확정(최후 보루).
+const REWRITE_MIN_REMAINING_MS = Number(process.env.REWRITE_MIN_REMAINING_MS) || 20000;
+//  - 남은 시간이 이 미만이면(하지만 위 최소는 넘으면) 도구 없는 '빠른 교정 모드'로 재작성.
+//    이 이상이면 새 조회까지 허용하는 풀 재작성.
+let REWRITE_FULL_REMAINING_MS = Number(process.env.REWRITE_FULL_REMAINING_MS) || 75000;
+// 임계값 역전 방지: 풀 재작성 기준은 항상 생략 기준보다 커야 한다(잘못된 env 설정 방어).
+if (REWRITE_FULL_REMAINING_MS < REWRITE_MIN_REMAINING_MS) REWRITE_FULL_REMAINING_MS = REWRITE_MIN_REMAINING_MS;
 // 과탐색 가드: search_decisions 누적 호출 상한(매칭 데이터 없는 쟁점의 무한 재검색 방지).
 const MAX_DECISION_SEARCHES = Number(process.env.MAX_DECISION_SEARCHES || 12);
 // 레이트리밋 가드: 법제처 API 429가 누적되면 재시도 루프를 끊고 현재 근거로 강제 합성.
@@ -678,7 +687,9 @@ export async function POST(req) {
         const verr = validateToolInput(name, input);
         if (verr) return { __error: true, message: verr };
         try {
-          return await mcpClient.callTool({ name, arguments: input }, undefined, { timeout: TOOL_TIMEOUT_MS });
+          // 도구 타임아웃을 전체 남은 시간으로도 제한 → 막판 도구 호출이 deadline(=함수 한계)을 넘기는 것 방지.
+          const toolTimeout = Math.max(1000, Math.min(TOOL_TIMEOUT_MS, deadline - Date.now()));
+          return await mcpClient.callTool({ name, arguments: input }, undefined, { timeout: toolTimeout });
         } catch (e) {
           const timeout = e?.name === 'TimeoutError' || /timeout|aborted/i.test(e?.message || '');
           const rateLimited = /too many requests|rate.?limit|429/i.test(e?.message || '');
@@ -708,7 +719,8 @@ export async function POST(req) {
       }
 
       // 스텝 소진 시: 도구 없이 강제로 최종 답변을 합성(수집한 근거 활용)
-      async function synthesize() {
+      // streamAnswer=false면 토큰을 화면에 흘리지 않는다(재작성 중 원본 유지용).
+      async function synthesize(streamAnswer = true) {
         if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
         const signal = makeSignal(deadline - Date.now());
         const ms = anthropic.messages.stream(
@@ -724,7 +736,7 @@ export async function POST(req) {
         for await (const ev of ms) {
           if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
             t += ev.delta.text;
-            send({ answerDelta: ev.delta.text });   // 합성 답변도 즉시 스트리밍
+            if (streamAnswer) send({ answerDelta: ev.delta.text });   // 합성 답변도 즉시 스트리밍
           }
         }
         const final = await ms.finalMessage();
@@ -734,14 +746,16 @@ export async function POST(req) {
       }
 
       // 한 번의 생성 패스(도구 루프). convo·stats를 공유·누적한다.
-      async function generate(maxSteps) {
+      // streamAnswer=false면 답변 토큰·폐기 신호를 화면에 보내지 않는다(재작성 중 원본 유지용).
+      // useTools=false면 도구 자체를 모델에 노출하지 않는다(빠른 교정 모드: 새 조회 구조적 차단).
+      async function generate(maxSteps, streamAnswer = true, useTools = true) {
         for (let step = 0; step < maxSteps; step++) {
           if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
-          // 레이트리밋 누적: 재시도 루프로 240초 abort되지 않도록 현재 근거로 강제 합성
+          // 레이트리밋 누적: 재시도 루프로 deadline abort되지 않도록 현재 근거로 강제 합성
           if (stats.rateLimited >= MAX_RATE_LIMIT_HITS) {
             console.warn('[WARN] rate-limit 누적으로 강제 합성:', stats.rateLimited);
-            send({ synthesizing: true });
-            return await synthesize();
+            if (streamAnswer) send({ synthesizing: true });
+            return await synthesize(streamAnswer);
           }
           const signal = makeSignal(deadline - Date.now());
 
@@ -750,7 +764,7 @@ export async function POST(req) {
               model: ANSWER_MODEL,
               max_tokens: 16000,
               system: cachedSystem,
-              tools: activeToolDefs,
+              ...(useTools ? { tools: activeToolDefs } : {}),
               messages: cloneWithLastMessageCache(convo),
             },
             { signal }
@@ -763,7 +777,7 @@ export async function POST(req) {
               send({ tool: ev.content_block.name });
             } else if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
               stepText += ev.delta.text;
-              send({ answerDelta: ev.delta.text });   // 답변 토큰 즉시 스트리밍
+              if (streamAnswer) send({ answerDelta: ev.delta.text });   // 답변 토큰 즉시 스트리밍
               streamedText = true;
             }
           }
@@ -777,7 +791,7 @@ export async function POST(req) {
           if (toolUses.length === 0) return { answerText: stepText };
 
           // 도구 호출이 뒤따르는 스텝의 텍스트는 '중간 출력'이므로 최종 답변이 아님 → 폐기 신호
-          if (streamedText) send({ discardDraft: true });
+          if (streamedText && streamAnswer) send({ discardDraft: true });
 
           convo.push({ role: 'assistant', content: final.content });
           const results = await Promise.all(
@@ -836,8 +850,8 @@ export async function POST(req) {
           convo.push({ role: 'user', content: results });
         }
         // 스텝 소진 → 수집한 근거로 강제 합성 (캔드 메시지로 버리지 않음)
-        send({ synthesizing: true });
-        return await synthesize();
+        if (streamAnswer) send({ synthesizing: true });
+        return await synthesize(streamAnswer);
       }
 
       // LLM-judge: 결론↔근거 정합성 + 해석쟁점 미조회 + 무근거 인용 검증
@@ -945,38 +959,47 @@ export async function POST(req) {
         }
 
         let rewriteFailed = false;
+        let rewriteSkippedForTime = false;
         if (needRewrite) {
-          send({ status: 'revising' });
-          send({ revising: true });
-          // 직전에 스트리밍한 잠정 초안은 재작성으로 교체됨 → 클라이언트 프리뷰 비우기
-          send({ discardDraft: true });
-          const reasons = [...new Set([...judge.reasons, ...det.fatal, ...softReasons])];
-          if (softReasons.length) judge.requireDecisionLookup = true;
-          // 이미 검색을 다 한 상태면(데이터 없음) rewrite에서 재검색해도 헛돔 →
-          // 재검색 강제 끄고, 도구 없이 현재 근거로 빠르게 재작성(2스텝). 이게 208초의 핵심 비용.
-          const searchExhausted = stats.decisionSearchAttempted >= MAX_DECISION_SEARCHES;
-          if (searchExhausted) judge.requireDecisionLookup = false;
-          const reviseMsg =
-            `직전 답변에 다음 문제가 있어 재작성이 필요합니다:\n- ${reasons.join('\n- ')}\n\n` +
-            `${judge.instructions ? judge.instructions + '\n' : ''}` +
-            `${judge.requireDecisionLookup ? '특히 적법성·공급시기 등 해석 쟁점이므로 search_decisions(interpretation·nts·tax_tribunal·precedent)와 get_decision_text로 관련 예규·심판례를 반드시 조회한 뒤, 도구로 확인한 사건·예규번호만 인용하라.\n' : ''}` +
-            `${searchExhausted ? '이미 여러 키워드·도메인으로 충분히 검색했으나 추가 자료를 찾지 못했다. 추가 도구 호출(검색·조회) 없이 현재까지 확보된 근거만으로, 못 찾은 부분은 보류로 명시하며 재작성하라.\n' : ''}` +
-            `핵심 결론은 상세 해설·확인된 근거와 일치시키고, 지정된 ===해설=== / ===관련법령=== 형식을 지켜 한국어로 다시 작성하라.`;
+          const remaining = deadline - Date.now();
+          if (remaining < REWRITE_MIN_REMAINING_MS) {
+            // 최후 보루: 남은 시간이 거의 없으면 재작성을 시작하지 않는다.
+            // (어차피 abort될 작업을 시작해 원본을 화면에서 지우고 시간만 낭비하는 것 방지)
+            rewriteSkippedForTime = true;
+            console.warn('[WARN] 재작성 생략 — 잔여시간 부족:', remaining, 'ms');
+          } else {
+            // ② 화면에 '재작성 중'만 알리고 원본은 그대로 둔다(discardDraft를 보내지 않음).
+            send({ status: 'revising' });
+            send({ revising: true });
+            const reasons = [...new Set([...judge.reasons, ...det.fatal, ...softReasons])];
+            if (softReasons.length) judge.requireDecisionLookup = true;
+            // ③ 빠른 교정 모드 판정: 검색을 이미 소진했거나 남은 시간이 빠듯하면
+            //    새 도구 호출 없이(2스텝) 기존 근거로만 다듬어 시간 안에 끝낸다.
+            const searchExhausted = stats.decisionSearchAttempted >= MAX_DECISION_SEARCHES;
+            const fastRewrite = searchExhausted || remaining < REWRITE_FULL_REMAINING_MS;
+            if (fastRewrite) judge.requireDecisionLookup = false;
+            const reviseMsg =
+              `직전 답변에 다음 문제가 있어 재작성이 필요합니다:\n- ${reasons.join('\n- ')}\n\n` +
+              `${judge.instructions ? judge.instructions + '\n' : ''}` +
+              `${judge.requireDecisionLookup ? '특히 적법성·공급시기 등 해석 쟁점이므로 search_decisions(interpretation·nts·tax_tribunal·precedent)와 get_decision_text로 관련 예규·심판례를 반드시 조회한 뒤, 도구로 확인한 사건·예규번호만 인용하라.\n' : ''}` +
+              `${fastRewrite ? '추가 도구 호출(검색·조회) 없이 현재까지 확보된 근거만으로, 못 찾은 부분은 보류로 명시하며 재작성하라.\n' : ''}` +
+              `핵심 결론은 상세 해설·확인된 근거와 일치시키고, 지정된 ===해설=== / ===관련법령=== 형식을 지켜 한국어로 다시 작성하라.`;
 
-          convo.push({ role: 'assistant', content: answerText });
-          convo.push({ role: 'user', content: reviseMsg });
+            convo.push({ role: 'assistant', content: answerText });
+            convo.push({ role: 'user', content: reviseMsg });
 
-          // 검색 소진 시엔 도구 없이 정리만 하면 되므로 스텝을 2로 묶어 빠르게 종료
-          try {
-            const second = await generate(searchExhausted ? 2 : REWRITE_STEPS);
-            if (second.answerText) answerText = second.answerText;
-            mark('rewrite done');
-          } catch (e) {
-            // 재작성 호출이 인프라/한도 오류로 실패해도 재작성 전 답변(answerText)을 보존.
-            // 멀쩡히 만든 답변을 에러 화면으로 덮어쓰지 않기 위함(바깥 catch로 전파하지 않음).
-            console.error('[WARN] rewrite 실패 — 재작성 전 답변 보존:', e.name, maskSecrets(e.message));
-            rewriteFailed = true;
-            send({ discardDraft: true });   // 재작성으로 흘렸을 수 있는 잠정 토큰 정리
+            // 재작성 토큰은 화면에 흘리지 않는다(streamAnswer=false) → 원본이 유지되다가 최종본으로 한 번에 교체.
+            // 빠른 교정 모드면 도구를 아예 노출하지 않아(useTools=false) 새 조회 없이 기존 근거로만 다듬는다.
+            try {
+              const second = await generate(fastRewrite ? 2 : REWRITE_STEPS, false, !fastRewrite);
+              if (second.answerText) answerText = second.answerText;
+              mark(`rewrite done (${fastRewrite ? 'fast' : 'full'})`);
+            } catch (e) {
+              // 재작성 호출이 인프라/한도/시간 오류로 실패해도 재작성 전 답변(answerText)을 보존.
+              // (재작성 중 스트리밍을 끈 상태라 화면엔 원본이 그대로 남아 있어 깜빡임 없음)
+              console.error('[WARN] rewrite 실패 — 재작성 전 답변 보존:', e.name, maskSecrets(e.message));
+              rewriteFailed = true;
+            }
           }
         }
 
@@ -1001,6 +1024,9 @@ export async function POST(req) {
         if (rewriteFailed) {
           warnings.push('재작성 단계가 일시 오류로 중단되어 직전 답변을 그대로 제공함');
         }
+        if (rewriteSkippedForTime) {
+          warnings.push('자동 재작성이 시간 부족으로 생략됨 — 핵심 결론은 상세 해설 근거로 직접 확인 권장');
+        }
         if (fatal.length) {
           answerText = blockedAnswer(fatal);
         } else if (warnings.length && !answerText.includes('[검증 경고:')) {
@@ -1020,7 +1046,7 @@ export async function POST(req) {
           decSearch: stats.decisionSearchAttempted, domains: [...stats.domainsSearched],
           judgeRan: needsJudge, judge: judge.action, rewrote: needRewrite, fatal, truncated: truncatedOut,
           // 진단: 재작성이 왜 트리거됐는지 운영 로그에서도 보이도록 사유를 남긴다.
-          judgeReasons: judge.reasons, soft: softReasons, rewriteFailed,
+          judgeReasons: judge.reasons, soft: softReasons, rewriteFailed, rewriteSkippedForTime,
           totalMs: Date.now() - startedAt,
         }));
 
