@@ -467,7 +467,45 @@ function pickJudgeModel(stats, det) {
   return FAST_JUDGE_MODEL;
 }
 
+// === 사용량 제한(rate limiting) =============================================
+// 인증 없이 공개된 엔드포인트가 유료 API를 무제한 호출당하는 것을 막는 1차 방어.
+// 주의: 서버리스(Vercel)에서는 인스턴스마다 메모리가 분리되므로 이 카운트는
+//       '인스턴스별' 근사치다. 엄밀한 전역 제한이 필요하면 외부 저장소(예: Upstash)로 교체.
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 10);
+const rateBuckets = new Map(); // ip -> number[] (요청 타임스탬프)
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const recent = (rateBuckets.get(ip) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT_MAX) {
+    rateBuckets.set(ip, recent);
+    return false;
+  }
+  recent.push(now);
+  rateBuckets.set(ip, recent);
+  // 메모리 누수 방지: 가끔 비어버린 버킷 정리
+  if (rateBuckets.size > 5000) {
+    for (const [k, v] of rateBuckets) {
+      if (!v.some((t) => now - t < RATE_LIMIT_WINDOW_MS)) rateBuckets.delete(k);
+    }
+  }
+  return true;
+}
+
 export async function POST(req) {
+  // 사용량 제한: 비싼 작업을 시작하기 전에 가장 먼저 거른다.
+  const ip =
+    req.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
+    req.headers.get('x-real-ip') ||
+    'unknown';
+  if (!checkRateLimit(ip)) {
+    return Response.json(
+      { error: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' },
+      { status: 429 }
+    );
+  }
+
   const { messages } = await req.json();
   const lastUserContent = messages.filter((m) => m.role === 'user').at(-1)?.content || '';
   const lastUserMsg = messageContentToText(lastUserContent);
@@ -481,6 +519,17 @@ export async function POST(req) {
   const deadline = Date.now() + TOTAL_TIMEOUT_MS;
   const startedAt = Date.now();
   const mark = (label) => { if (!IS_PROD) console.log(`[TIME] ${label}: ${Date.now() - startedAt}ms`); };
+
+  // 타임아웃 신호 + 클라이언트 중단 신호를 하나로 결합.
+  // 사용자가 '정지'를 누르거나 연결을 끊으면 req.signal이 abort되어,
+  // 진행 중이던 유료 AI 호출(생성·judge·재작성)도 즉시 함께 중단된다.
+  const makeSignal = (ms) => {
+    const timeout = AbortSignal.timeout(Math.max(1000, ms));
+    if (req.signal && typeof AbortSignal.any === 'function') {
+      return AbortSignal.any([req.signal, timeout]);
+    }
+    return timeout;
+  };
 
   // 진단: 클라이언트(브라우저/프록시)가 연결을 끊었는지 감지 — 캡 vs 코드 원인 구분용
   let clientAborted = false;
@@ -623,7 +672,7 @@ export async function POST(req) {
       // 스텝 소진 시: 도구 없이 강제로 최종 답변을 합성(수집한 근거 활용)
       async function synthesize() {
         if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
-        const signal = AbortSignal.timeout(Math.max(1000, deadline - Date.now()));
+        const signal = makeSignal(deadline - Date.now());
         const ms = anthropic.messages.stream(
           {
             model: ANSWER_MODEL,
@@ -656,7 +705,7 @@ export async function POST(req) {
             send({ synthesizing: true });
             return await synthesize();
           }
-          const signal = AbortSignal.timeout(Math.max(1000, deadline - Date.now()));
+          const signal = makeSignal(deadline - Date.now());
 
           const ms = anthropic.messages.stream(
             {
@@ -780,7 +829,7 @@ export async function POST(req) {
           `[검증 대상 답변]\n${answer}`;
 
         try {
-          const signal = AbortSignal.timeout(Math.max(1000, Math.min(60000, deadline - Date.now())));
+          const signal = makeSignal(Math.min(60000, deadline - Date.now()));
           const res = await anthropic.messages.create(
             { model: judgeModel, max_tokens: 1500, system: judgeSystem, messages: [{ role: 'user', content: judgeUser }] },
             { signal }

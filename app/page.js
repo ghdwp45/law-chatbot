@@ -62,8 +62,18 @@ export default function Home() {
     window._clickArticle = handleArticleClick;
   }, [lawLinks]);
 
+  // 사용자 입력·모델 출력에 섞인 HTML이 그대로 실행되는 것(XSS)을 막기 위해
+  // 먼저 위험 문자를 무력화한 뒤에만 우리가 의도한 태그(굵게·조문링크)를 입힌다.
+  const escapeHtml = (s) =>
+    String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
   const formatExplain = (text) => {
-    return text
+    return escapeHtml(text)
       .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
       .replace(/(제\d+조(?:의\d+)?(?:\s*제\d+항)?(?:\s*제\d+호)?)/g,
         `<span class="law-ref" onclick="window._clickArticle('$1')">$1</span>`)
@@ -86,6 +96,7 @@ export default function Home() {
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     setActiveArticle(null);
+    setLawLinks([]);   // 새 질문 시작 시 이전 답변의 관련 법령을 비운다
 
     const newMessages = [...messages, { role: "user", content: userText }];
     setMessages(newMessages);
@@ -160,7 +171,8 @@ export default function Home() {
         if (parsed.done && parsed.full) {
           const { explainText, links } = parseResponse(parsed.full);
           renderLast(explainText);
-          if (links.length > 0) setLawLinks(links);
+          // 관련 법령이 없으면 빈 배열로 교체해, 이전 답변의 법령이 남지 않게 한다.
+          setLawLinks(links);
         }
         if (parsed.error) {
           const isOverloaded = parsed.error.toLowerCase().includes("overload");
@@ -267,10 +279,15 @@ export default function Home() {
             {messages.map((m, i) => (
               <div key={i} style={{...s.msgRow, justifyContent: m.role === "user" ? "flex-end" : "flex-start"}}>
                 {m.role === "assistant" && <div style={s.avatarAi}>법</div>}
-                <div
-                  style={m.role === "user" ? s.bubbleUser : s.bubbleAi}
-                  dangerouslySetInnerHTML={{ __html: m.role === "assistant" ? formatExplain(m.content) : m.content }}
-                />
+                {m.role === "assistant" ? (
+                  <div
+                    style={s.bubbleAi}
+                    dangerouslySetInnerHTML={{ __html: formatExplain(m.content) }}
+                  />
+                ) : (
+                  // 사용자 메시지는 절대 HTML로 해석하지 않고 일반 텍스트로 표시
+                  <div style={s.bubbleUser}>{m.content}</div>
+                )}
                 {m.role === "user" && <div style={s.avatarUser}>나</div>}
               </div>
             ))}
