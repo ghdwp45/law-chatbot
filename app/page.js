@@ -18,6 +18,25 @@ const TAG_GUIDE = [
 const getLawSearchUrl = (lawName) =>
   `https://www.law.go.kr/lsSc.do?section=&menuId=1&subMenuId=15&tabMenuId=81&eventGubun=060101&query=${encodeURIComponent(lawName)}`;
 
+// K-IFRS 회계기준은 법령(law.go.kr)이 아니라 회계기준원(KASB) 열람서비스로 연결한다.
+// KASB 딥링크는 /s/{기준서번호}/{코드} 형식인데, 코드 칸은 장식이라 번호만으로 해당 기준서가
+// 열린다(확인됨: /s/1115/test → 제1115호). 따라서 번호만으로 딥링크를 만든다.
+// 번호를 못 뽑은 경우(회계기준이지만 번호 미상)만 열람서비스 기본페이지로 폴백한다.
+const KASB_BASE = "https://db.kasb.or.kr/standard/";
+const getKasbUrl = (stdNo) =>
+  stdNo ? `https://db.kasb.or.kr/s/${stdNo}/std` : KASB_BASE;
+// 관련 항목이 K-IFRS 회계기준이면 기준서번호 문자열을, 법령이면 null을 반환.
+// (법령은 '제n조', K-IFRS는 '제nnnn호' 형식이라 4자리 호 또는 회계기준 키워드로 판별)
+const kifrsStdNo = (link) => {
+  const hay = `${link.lawName || ""} ${link.articleNo || ""}`;
+  const m = hay.match(/제\s*(\d{3,4})\s*호/);
+  const looksKifrs =
+    /회계기준|기업회계기준|K-?IFRS|한국채택국제회계기준|해석서/i.test(hay) ||
+    (m && Number(m[1]) >= 1000);
+  if (!looksKifrs) return null;
+  return m ? m[1] : "";
+};
+
 export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -384,10 +403,15 @@ export default function Home() {
                 {lawLinks.map((link, i) => {
                   const key = link.articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
                   const isActive = activeArticle && link.articleNo.includes(activeArticle.match(/제\d+조(?:의\d+)?/)?.[0] || activeArticle);
+                  // K-IFRS 회계기준이면 KASB 열람서비스로, 법령이면 국가법령정보센터로 연결.
+                  const std = kifrsStdNo(link);
+                  const isKifrs = std !== null;
+                  const href = isKifrs ? getKasbUrl(std) : getLawSearchUrl(link.lawName);
+                  const urlLabel = isKifrs ? "📘 KASB 회계기준 열람 →" : "🔗 law.go.kr에서 원문 보기 →";
                   return (
                     <a key={i}
                       ref={el => { if (key) linkRefs.current[key] = el; }}
-                      href={getLawSearchUrl(link.lawName)}
+                      href={href}
                       target="_blank"
                       rel="noopener noreferrer"
                       style={{...s.lawLink, ...(isActive ? s.lawLinkActive : {})}}
@@ -398,7 +422,7 @@ export default function Home() {
                         <span style={{...s.lawLinkArticle, ...(isActive ? s.lawLinkArticleActive : {})}}>{link.articleNo}</span>
                       </div>
                       {link.desc && <div style={s.lawLinkDesc}>{link.desc}</div>}
-                      <div style={s.lawLinkUrl}>🔗 law.go.kr에서 원문 보기 →</div>
+                      <div style={s.lawLinkUrl}>{urlLabel}</div>
                     </a>
                   );
                 })}
