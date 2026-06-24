@@ -25,6 +25,7 @@ export async function GET(request) {
     GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
     SUPABASE_URL: !!process.env.SUPABASE_URL,
     SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+    HEALTH_TOKEN: !!process.env.HEALTH_TOKEN,  // 값은 노출 안 함, 설정 여부만
   };
   const result = { ok: false, env, embed: 'skipped', supabase: 'skipped', dims: null };
 
@@ -36,8 +37,9 @@ export async function GET(request) {
 
   // 비용 드는 실제 호출(probe)은 토큰으로 잠근다 — 아무나 호출해 Gemini 비용이 새는 것 방지.
   // HEALTH_TOKEN(Vercel 환경변수)과 URL의 token 파라미터가 일치할 때만 실행.
-  const token = new URL(request.url).searchParams.get('token');
-  if (!process.env.HEALTH_TOKEN || token !== process.env.HEALTH_TOKEN) {
+  const token = (new URL(request.url).searchParams.get('token') || '').trim();
+  const expected = (process.env.HEALTH_TOKEN || '').trim();  // 값 끝 공백·줄바꿈 실수 방어
+  if (!expected || token !== expected) {
     return Response.json(
       { ok: false, env, error: 'probe는 유효한 token이 필요합니다(?probe=1&token=…). 키 존재여부는 token 없이 확인 가능.' },
       { status: 401 }
