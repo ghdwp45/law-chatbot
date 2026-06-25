@@ -909,6 +909,46 @@ function isTaxQuestion(q) {
   );
 }
 
+// 세무 리서치 4버킷 coverage 산출 — 회계법인 에이전트처럼 다출처를 빠짐없이 검토했는지 판정한다.
+// 판정 기준은 '확인(checked)' = 결과있음(ok) 또는 0건(empty)을 실제로 받았는가. (성공만 요구하면
+// 데이터가 원래 없는 버킷이 영원히 미충족되므로, 0건도 '조회는 했음'으로 충족 처리한다.)
+//   - __guard(검색 한도 안내)는 실제 조회가 아니므로 checked로 치지 않는다.
+//   - error/timeout도 checked 아님(errored로 따로 표시 → 경고).
+//   - ② 과세관청해석은 '본문이 있는' search_nts_taxlaw만 인정한다. search_decisions(nts)는 제목·링크뿐이라
+//     본문 인용 근거가 못 되므로 제외(과거 '본문 없는 색인으로 인용 통과' 누수 재발 방지).
+function computeCoverage(stats) {
+  const calls = Array.isArray(stats?.calls) ? stats.calls : [];
+  const isChecked = (c) => !c.guard && (c.cls === 'ok' || c.cls === 'empty');
+  const mk = (list, label) => {
+    const checked = list.some(isChecked);
+    const hasData = list.some((c) => !c.guard && c.cls === 'ok');
+    return {
+      label,
+      checked,
+      hasData,
+      onlyEmpty: checked && !hasData,                  // 조회했으나 0건(경고 표시용)
+      errored: !checked && list.some((c) => c.cls === 'error'), // 오류/타임아웃만 있고 확인 못 함
+      attempts: list.length,
+    };
+  };
+  return {
+    law: mk(calls.filter((c) => c.name === 'search_law' || c.name === 'get_law_text'), '법령 원문'),
+    admin: mk(calls.filter((c) => c.name === 'search_nts_taxlaw'), '기재부/국세청 해석'),
+    tribunal: mk(calls.filter((c) => c.name === 'search_decisions' && c.domain === 'tax_tribunal'), '조세심판원'),
+    precedent: mk(
+      calls.filter((c) => c.name === 'search_decisions' && (c.domain === 'precedent' || c.domain === 'interpretation')),
+      '법원 판례/법제처 해석례'
+    ),
+  };
+}
+
+// 고위험 세무 해석질문의 '필수 출처 버킷' 충족 여부.
+// 출하 기준: ②과세관청해석 확인 AND (③조세심판원 또는 ④판례/해석례 중 하나 이상 확인).
+// (4버킷 전부 강제는 단순질문 과조회·타임아웃 위험이 커서, 최소 출하선은 ②+(③|④)로 둔다.)
+function hasRequiredResearchCoverage(coverage) {
+  return coverage.admin.checked && (coverage.tribunal.checked || coverage.precedent.checked);
+}
+
 // 결정적 근거 정합성 평가 → fatal(차단) / warning(배너).
 function evaluateIntegrity(answerText, stats) {
   const fatal = [];
@@ -1532,7 +1572,8 @@ export async function POST(req) {
                 truncated = false;
               }
               stats.attempted += 1;
-              stats.calls.push({ name: tu.name, cls, domain: tu.input?.domain, query: tu.input?.query });
+              // guard: __guard(검색 한도 안내 등)는 실제 조회가 아니므로 cls='ok'여도 coverage에서 제외한다.
+              stats.calls.push({ name: tu.name, cls, domain: tu.input?.domain, query: tu.input?.query, guard: !!r?.__guard });
               if (cls === 'error') {
                 stats.errors.push({
                   name: tu.name,
@@ -1704,12 +1745,19 @@ export async function POST(req) {
         if (hasConclusionContradiction(answerText)) {
           softReasons.push('핵심 결론이 상세 해설의 위반·미충족 판단과 모순됨(긍정 단정 ↔ 본문 부정)');
         }
-        // 해석 쟁점은 예규·심판례 검색이 원칙이나, 국세청 질의회신 RAG(search_nts_taxlaw)로
-        // 과세관청 해석을 확인했으면 조회 요건을 충족한 것으로 본다.
+        // 해석 쟁점은 다출처(과세관청해석+조세심판원/판례)를 '버킷'으로 검토해야 한다.
+        // 한 버킷만 보고 닫으면(예: 국세청 RAG만, 또는 판례만) 재작성으로 빠진 버킷을 마저 조회시킨다.
+        // checked=ok|empty라 데이터 없는 버킷은 0건으로 충족되어 무한 미충족을 막는다.
+        const coverage = computeCoverage(stats);
         const missingDecisionLookup =
-          isHighRiskLegalQuestion(stats.question) && stats.decisionSearchAttempted === 0 && !stats.ntsRagSucceeded;
+          isHighRiskLegalQuestion(stats.question) && !hasRequiredResearchCoverage(coverage);
         if (missingDecisionLookup) {
-          softReasons.push('해석 쟁점인데 예규·심판례(search_decisions)나 국세청 질의회신(search_nts_taxlaw) 조회가 수행되지 않음');
+          const miss = [];
+          if (!coverage.admin.checked) miss.push('기재부/국세청 해석(search_nts_taxlaw)');
+          if (!coverage.tribunal.checked && !coverage.precedent.checked) {
+            miss.push('조세심판원(search_decisions tax_tribunal) 또는 판례·해석례(precedent/interpretation)');
+          }
+          softReasons.push(`해석 쟁점인데 필수 출처 버킷 미확인 — 다음을 조회해야 함: ${miss.join(', ')}`);
         }
 
         // judge 조건부 실행 + 모델 분기 (저위험·근거충분·형식정상일 때만 생략)
@@ -1787,8 +1835,10 @@ export async function POST(req) {
         if (hasConclusionContradiction(answerText)) {
           warnings.unshift('핵심 결론이 본문 판단과 모순될 수 있음 — 결론보다 상세 해설의 근거를 우선 확인하십시오');
         }
-        if (isHighRiskLegalQuestion(stats.question) && stats.decisionSearchAttempted === 0 && !stats.ntsRagSucceeded) {
-          warnings.push('예규·심판례 미조회 — 법령 문언만으로 도출된 결론이므로 단정에 주의');
+        // 재작성 단계에서 추가 조회가 있었을 수 있으므로 coverage를 다시 산출해 판정한다.
+        const coverageFinal = computeCoverage(stats);
+        if (isHighRiskLegalQuestion(stats.question) && !hasRequiredResearchCoverage(coverageFinal)) {
+          warnings.push('필수 출처 버킷 미확인(과세관청 해석 또는 조세심판원·판례 미조회) — 법령 문언만으로 도출된 결론일 수 있으니 단정에 주의');
         }
         if (judge.reasons?.some((r) => r.includes('일시 불가'))) {
           warnings.push('자동 정합성 검증을 완료하지 못함(일시적 API 오류) — 핵심 결론은 상세 해설 근거로 직접 확인 권장');
