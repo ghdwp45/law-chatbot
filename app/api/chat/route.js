@@ -178,6 +178,7 @@ const TOOL_DEFS = [
       properties: {
         query: { type: 'string', description: '검색할 질의 내용(자연어 문장 가능)' },
         tlaw: { type: 'string', description: '세목으로 좁히기(예: 부가가치세, 법인세, 양도소득세). 모르면 비워둔다.' },
+        source: { type: 'string', enum: ['mof', 'nts'], description: "출처로 좁히기: 'mof'=기재부 세법해석만, 'nts'=국세청 질의회신만. 국세청 자료가 압도적으로 많아 기재부 해석을 확실히 보려면 source='mof'로 따로 한 번 더 검색하라. 전체를 보려면 비워둔다." },
         top_k: { type: 'number', description: '반환할 결과 수(기본 5, 최대 10)' },
       },
       required: ['query'],
@@ -284,7 +285,7 @@ function normalizeStdNo(std) {
   return s;
 }
 
-async function runNtsSearch({ query, tlaw, top_k }) {
+async function runNtsSearch({ query, tlaw, top_k, source }) {
   try {
     const signal = AbortSignal.timeout(TOOL_TIMEOUT_MS);
     const requestedCount = Number(top_k ?? 5);
@@ -320,12 +321,20 @@ async function runNtsSearch({ query, tlaw, top_k }) {
         config: { taskType: 'RETRIEVAL_QUERY', outputDimensionality: NTS_EMBED_DIM, abortSignal: signal },
       });
       const queryEmbedding = emb.embeddings[0].values;
-      const { data, error } = await getSupabase().rpc('match_nts_chunks_hybrid', {
+      const filterSource = (source === 'mof' || source === 'nts') ? source : null;
+      const rpcArgs = {
         query_embedding: queryEmbedding,
         query_text: query,
         match_count: matchCount,
         filter_tlaw: normalizeTlaw(tlaw),   // 세목 약칭('부가세') → 정식명칭('부가가치세')
-      }).abortSignal(signal);
+      };
+      if (filterSource) rpcArgs.filter_source = filterSource;
+      let { data, error } = await getSupabase().rpc('match_nts_chunks_hybrid', rpcArgs).abortSignal(signal);
+      // 마이그레이션 007 미적용 환경 하위호환: filter_source 미지원이면 source 없이 1회 재시도.
+      if (error && filterSource && /filter_source|function .*match_nts_chunks_hybrid|does not exist|schema cache/i.test(error.message || '')) {
+        delete rpcArgs.filter_source;
+        ({ data, error } = await getSupabase().rpc('match_nts_chunks_hybrid', rpcArgs).abortSignal(AbortSignal.timeout(TOOL_TIMEOUT_MS)));
+      }
       if (error) return { __error: true, message: `nts 검색 실패: ${error.message}` };
       hadHybridData = (data || []).length > 0;
       // 관련도 문턱: 하이브리드 결과(코사인 유사도 보유 행)에서 문턱 미만을 거른다.
@@ -346,9 +355,10 @@ async function runNtsSearch({ query, tlaw, top_k }) {
       } else {
         // 원본엔 결과가 있었는데 문턱으로 전부 걸러졌으면, 관련도 낮음을 명시해 garbage 인용을 막는다.
         const flooredOut = hadHybridData && hybridRows.length === 0 && docnoRows.length === 0;
+        const srcLabel = source === 'mof' ? '기재부 세법해석' : source === 'nts' ? '국세청 질의회신' : '국세청·기재부 질의회신';
         text = flooredOut
-          ? `[검색 결과 0건] 질의와 충분히 관련된(코사인 유사도 ≥ ${NTS_MIN_SIM}) 국세청·기재부 질의회신 자료가 없습니다(최고 유사도 ${topSim === null ? 'N/A' : topSim.toFixed(3)}). 키워드를 바꿔 재검색하거나, 관련 실무해석이 확인되지 않는다고 보고하세요.`
-          : '[검색 결과 0건] 해당 조건에 맞는 국세청 질의회신 자료가 없습니다.';
+          ? `[검색 결과 0건] 질의와 충분히 관련된(코사인 유사도 ≥ ${NTS_MIN_SIM}) ${srcLabel} 자료가 없습니다(최고 유사도 ${topSim === null ? 'N/A' : topSim.toFixed(3)}). 키워드를 바꿔 재검색하거나, 관련 실무해석이 확인되지 않는다고 보고하세요.`
+          : `[검색 결과 0건] 해당 조건에 맞는 ${srcLabel} 자료가 없습니다.`;
       }
       return { isError: false, content: [{ type: 'text', text }] };
     }
@@ -624,12 +634,13 @@ ${earlyStop}
 [세무 리서치 프로토콜 - 세금계산서·공급시기·귀속시기·가산세·특례·기간 등 해석 쟁점에 필수]
 회계법인 세무 검토처럼, 아래 4개 출처 버킷을 '각각 독립적으로' 조회한 뒤 종합해 답변한다. 한 버킷에서 결과가 나왔다고 다른 버킷 조회를 생략하지 말 것(예: 국세청 질의회신만 보고, 또는 판례만 보고 답을 닫지 말 것).
 1. 법령 원문: search_law/get_law_text로 법률(필요 시 시행령·시행규칙)의 핵심 조문 확인
-2. 과세관청 해석: search_nts_taxlaw로 국세청 질의회신·기재부 세법해석 검색(본문 확인 — search_decisions의 nts 도메인은 제목·링크뿐이라 이 버킷을 대체하지 못함)
+2. 과세관청 해석: search_nts_taxlaw로 국세청 질의회신·기재부 세법해석 검색(본문 확인 — search_decisions의 nts 도메인은 제목·링크뿐이라 이 버킷을 대체하지 못함). ★중요: 이 DB는 국세청(약 7.5만건)이 기재부(약 972건)보다 압도적으로 많아 기본 검색만 하면 기재부 해석이 상위 결과에 묻혀 누락된다. 그러므로 이 버킷은 반드시 두 번 조회한다 — (a) source 지정 없이 1회, (b) source="mof"로 기재부 전용 1회. 기재부 결과가 나오면 🏛️[기재부 세법해석] 태그로 인용한다.
 3. 조세심판원: search_decisions(domain="tax_tribunal")
 4. 법원 판례·법제처 해석례: search_decisions(domain="precedent")와 search_decisions(domain="interpretation")
+- [검색어 2개 축] 공급시기·귀속시기·계속적 용역·가산세 등 쟁점은 사실관계가 두 갈래의 법리로 갈리는 경우가 많다. 조세심판원·판례 검색(3·4번)은 반드시 두 개념 축으로 나눠 조회한다: (축1) 직접 쟁점 그대로(예: "월합계 세금계산서 1역월"), (축2) 우회·연결 쟁점(예: "계속적 용역 공급가액 확정 공급시기 지연발급 가산세"). 한 축만 검색해 0건이라고 닫지 말 것.
 - [속도] 위 2~4 검색은 서로 의존하지 않으므로 반드시 같은 어시스턴트 턴에서 한꺼번에(병렬) 호출한다. 법령 mst가 필요한 get_law_text만 search_law 다음 턴에 모아 호출한다.
 - 각 버킷 결과가 0건이면 '현재 조회 범위에서는 확인하지 못함'으로 답변에 명시한다. '빠뜨려서 안 본 것'과 '조회했으나 0건인 것'을 구분해 드러낸다.
-- (검색어 예시) "전월 26일~당월 25일 월합계 세금계산서" 쟁점이라면 search_nts_taxlaw("전월 26일 당월 25일 월합계 세금계산서", tlaw="부가가치세"), search_nts_taxlaw("계속적 용역 공급가액 확정 공급시기", tlaw="부가가치세"), search_decisions("tax_tribunal","월합계 세금계산서 1역월"), search_decisions("precedent","월합계 세금계산서") 처럼 버킷별로 나누어 한 턴에 병렬 조회한다.
+- (검색어 예시) "전월 26일~당월 25일 월합계 세금계산서" 쟁점이라면 search_nts_taxlaw("전월 26일 당월 25일 월합계 세금계산서", tlaw="부가가치세"), search_nts_taxlaw("월합계 세금계산서 1역월", tlaw="부가가치세", source="mof"), search_nts_taxlaw("계속적 용역 공급가액 확정 공급시기", tlaw="부가가치세"), search_decisions("tax_tribunal","월합계 세금계산서 1역월"), search_decisions("tax_tribunal","계속적 용역 공급가액 확정 공급시기 지연발급 가산세"), search_decisions("precedent","월합계 세금계산서") 처럼 버킷별·축별로 나누어 한 턴에 병렬 조회한다.
 
 [세법 조회 보강 원칙]
 - 세법 질문은 원칙적으로 법률·시행령·시행규칙을 함께 검토한다. 법률 조문만으로 결론이 어려우면 시행령·시행규칙을 추가 조회한다.
@@ -793,6 +804,9 @@ function validateToolInput(name, input) {
         (typeof input.top_k !== 'number' || !Number.isFinite(input.top_k) || input.top_k < 1)) {
       return 'search_nts_taxlaw의 top_k는 1 이상의 숫자여야 합니다.';
     }
+    if (input.source !== undefined && input.source !== null && !['mof', 'nts'].includes(input.source)) {
+      return "search_nts_taxlaw의 source는 'mof' 또는 'nts'여야 합니다.";
+    }
   }
   if (name === 'search_kifrs_accounting') {
     if (typeof input?.query !== 'string' || !input.query.trim()) {
@@ -941,9 +955,14 @@ function computeCoverage(stats) {
       attempts: list.length,
     };
   };
+  const admin = mk(calls.filter((c) => c.name === 'search_nts_taxlaw'), '기재부/국세청 해석');
+  // 과세관청 버킷 안에서 기재부/국세청을 따로 본다(표시·보충 판단용). 실제 결과(stats.sources)로 판정한다.
+  const sources = Array.isArray(stats?.sources) ? stats.sources : [];
+  admin.mofFound = sources.some((s) => s.kind === 'nts' && s.mof);
+  admin.ntsFound = sources.some((s) => s.kind === 'nts' && !s.mof);
   return {
     law: mk(calls.filter((c) => c.name === 'search_law' || c.name === 'get_law_text'), '법령 원문'),
-    admin: mk(calls.filter((c) => c.name === 'search_nts_taxlaw'), '기재부/국세청 해석'),
+    admin,
     tribunal: mk(calls.filter((c) => c.name === 'search_decisions' && c.domain === 'tax_tribunal'), '조세심판원'),
     precedent: mk(
       calls.filter((c) => c.name === 'search_decisions' && (c.domain === 'precedent' || c.domain === 'interpretation')),
@@ -1174,11 +1193,18 @@ function buildSourcesForClient(sources) {
 function buildCoverageForClient(coverage) {
   if (!coverage) return null;
   const status = (b) => (b.hasData ? 'found' : b.checked ? 'empty' : b.errored ? 'error' : 'skipped');
-  return ['law', 'admin', 'tribunal', 'precedent'].map((k) => ({
-    key: k,
-    label: coverage[k].label,
-    status: status(coverage[k]),
-  }));
+  // 과세관청 버킷은 기재부/국세청을 따로 보여준다(사용자가 기재부 누락을 눈으로 확인 가능).
+  // 본문(found/empty/error/skipped)은 stats.calls 기반, 기재부/국세청 발견 여부는 stats.sources 기반.
+  const a = coverage.admin;
+  const adminBase = status(a);
+  const subStatus = (found) => (found ? 'found' : a.checked ? 'empty' : adminBase);
+  const rows = [];
+  rows.push({ key: 'law', label: coverage.law.label, status: status(coverage.law) });
+  rows.push({ key: 'admin_nts', label: '국세청 질의회신', status: subStatus(a.ntsFound) });
+  rows.push({ key: 'admin_mof', label: '기재부 세법해석', status: subStatus(a.mofFound) });
+  rows.push({ key: 'tribunal', label: coverage.tribunal.label, status: status(coverage.tribunal) });
+  rows.push({ key: 'precedent', label: coverage.precedent.label, status: status(coverage.precedent) });
+  return rows;
 }
 
 // LLM-judge 출력 파싱 (실패 시 fail-open=pass, 결정적 게이트가 여전히 방어)
@@ -1769,32 +1795,44 @@ export async function POST(req) {
         // 다시 도구를 호출하지 않는다(최종 경고로만 표시) → 무한 재조회 차단.
         let coverage = computeCoverage(stats);
         let coverageRepairDone = false;
-        if (isHighRiskLegalQuestion(stats.question) && !hasRequiredResearchCoverage(coverage)
+        // 보충 트리거: ①필수 버킷 미충족(과세관청 AND (심판원|판례))이거나, ②질(質) 보강이 필요한 경우.
+        // 질 보강 = 기재부를 한 번도 못 가져옴(국세청에 묻힘) 또는 심판원/판례가 '조회는 했으나 0건'(검색어 축이 빗나갔을 공산).
+        const coverageQualityGap =
+          (coverage.admin.checked && !coverage.admin.mofFound) ||
+          coverage.tribunal.onlyEmpty || coverage.precedent.onlyEmpty;
+        if (isHighRiskLegalQuestion(stats.question)
+            && (!hasRequiredResearchCoverage(coverage) || coverageQualityGap)
             && (deadline - Date.now()) > REWRITE_FULL_REMAINING_MS) {
           const miss = [];
           if (!coverage.admin.checked) {
-            miss.push('과세관청 해석 — search_nts_taxlaw로 국세청 질의회신·기재부 세법해석 검색(본문 확인)');
+            miss.push('과세관청 해석 — search_nts_taxlaw로 국세청 질의회신 검색(본문 확인), 그리고 source="mof"로 기재부 세법해석을 전용으로 한 번 더 검색');
+          } else if (!coverage.admin.mofFound) {
+            miss.push('기재부 세법해석 — search_nts_taxlaw에 source="mof"를 지정해 기재부 전용으로 검색(국세청 자료가 많아 기본 검색에서 묻힘). 결과가 나오면 🏛️[기재부 세법해석]로 인용');
           }
-          if (!coverage.tribunal.checked && !coverage.precedent.checked) {
-            miss.push('조세심판원 — search_decisions(domain="tax_tribunal"); 그리고 법원 판례·법제처 해석례 — search_decisions(domain="precedent")와 (domain="interpretation")');
+          const tribunalGap = !coverage.tribunal.checked || coverage.tribunal.onlyEmpty;
+          const precedentGap = !coverage.precedent.checked || coverage.precedent.onlyEmpty;
+          if ((tribunalGap || precedentGap) && !(coverage.tribunal.hasData && coverage.precedent.hasData)) {
+            miss.push('조세심판원·판례 — search_decisions(domain="tax_tribunal")와 (domain="precedent")/(domain="interpretation")를 두 개념 축(①직접 쟁점, ②우회 쟁점 예: "계속적 용역 공급가액 확정 공급시기 지연발급 가산세")으로 각각 검색. 이미 쓴 검색어는 반복하지 말 것');
           }
-          const repairMsg =
-            `직전 답변은 출처 검토 폭이 부족하다. 아래 '빠진 출처 버킷만' 같은 턴에 한꺼번에(병렬) 조회한 뒤, ` +
-            `그 결과를 반영해 지정된 ===해설=== / ===관련법령=== 형식으로 한국어로 다시 작성하라. 새로 조회할 버킷:\n- ${miss.join('\n- ')}\n` +
-            `결과가 0건이면 '현재 조회 범위에서는 확인하지 못함'으로 명시하라. 이미 확인한 버킷은 다시 조회하지 말 것.`;
-          convo.push({ role: 'assistant', content: answerText });
-          convo.push({ role: 'user', content: repairMsg });
-          send({ status: 'researching' });
-          send({ revising: true });   // 원본은 화면에 유지(폐기 신호 없이)하고 보충 조회 진행만 표시
-          try {
-            const repaired = await generate(REWRITE_STEPS, false, true);  // 도구 ON, 토큰 비스트리밍
-            if (repaired.answerText) answerText = repaired.answerText;
-          } catch (e) {
-            console.warn('[WARN] coverage repair 실패(원본 유지):', e?.name, e?.message);
+          if (miss.length > 0) {
+            const repairMsg =
+              `직전 답변은 출처 검토 폭이 부족하다. 아래 '빠진 출처 버킷만' 같은 턴에 한꺼번에(병렬) 조회한 뒤, ` +
+              `그 결과를 반영해 지정된 ===해설=== / ===관련법령=== 형식으로 한국어로 다시 작성하라. 새로 조회할 버킷:\n- ${miss.join('\n- ')}\n` +
+              `결과가 0건이면 '현재 조회 범위에서는 확인하지 못함'으로 명시하라. 이미 충분히 확인한 버킷은 다시 조회하지 말 것.`;
+            convo.push({ role: 'assistant', content: answerText });
+            convo.push({ role: 'user', content: repairMsg });
+            send({ status: 'researching' });
+            send({ revising: true });   // 원본은 화면에 유지(폐기 신호 없이)하고 보충 조회 진행만 표시
+            try {
+              const repaired = await generate(REWRITE_STEPS, false, true);  // 도구 ON, 토큰 비스트리밍
+              if (repaired.answerText) answerText = repaired.answerText;
+            } catch (e) {
+              console.warn('[WARN] coverage repair 실패(원본 유지):', e?.name, e?.message);
+            }
+            coverageRepairDone = true;
+            coverage = computeCoverage(stats);   // 보충 후 재산출
+            mark('coverage repair done');
           }
-          coverageRepairDone = true;
-          coverage = computeCoverage(stats);   // 보충 후 재산출
-          mark('coverage repair done');
         }
 
         // 결정적 검사(항상 실행) + 소프트 신호(judge와 무관하게 재작성 강제)
