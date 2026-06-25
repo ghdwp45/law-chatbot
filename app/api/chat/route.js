@@ -843,12 +843,37 @@ function normalizeArticleNo(jo) {
   return s;
 }
 
+// 법령 조문 본문에서 흔히 등장하는 지시대명사적 표현('같은 법'·'동법'·'해당 법'처럼 실제 법령명이
+// 아니라 앞서 언급한 법을 가리키는 말). 정규식이 이를 법령명으로 오인하면 안 된다.
+const GENERIC_LAW_REF_RE = /^(같은|동|해당|위|그|본|이)\s*법(률)?$/;
+// 조사로 끝나는 단어(예: '법인은'·'법인을') 뒤에 공백을 두고 짧은 '법'이 오면, 이는 실제 법령명이
+// 아니라 '~법인은 법 제86조에 따라'처럼 문장이 그 법(자기참조)을 가리키는 것이다. 이런 경우
+// suffix 단어(법/법률/령/규칙) 직전 토큰이 조사로 끝나면 후보에서 제외한다.
+const PARTICLE_BEFORE_SUFFIX_RE = /(은|는|이|가|을|를|에|로|와|과|도|만|의|라)$/;
+// 거부된 앞 후보의 나열 접속사('같은 법 제51조의2 및 부가가치세법'의 '및')가 다음 후보 캡처의
+// 선두에 그대로 묻어 들어오는 경우, 진짜 이름만 남기도록 선두 접속사를 제거한다.
+const LEADING_FILLER_RE = /^(및|또는|혹은|그리고)\s+/;
+
 // get_law_text 결과 본문에서 법령명을 best-effort로 추출(표시용). 못 찾으면 null.
+// 본문에 '같은 법 제51조의2'·'…법인은 법 제86조'처럼 자기참조 표현이 실제 법령명보다 먼저
+// 나올 수 있어, 첫 매치만 보지 않고 모든 후보를 훑어 그런 표현을 걸러낸 첫 유효 후보를 쓴다.
 function extractLawNameFromText(text) {
-  const m = String(text || '').match(/([가-힣][가-힣A-Za-z0-9·ㆍ\s]{1,28}?(?:법률|법|령|규칙))\s*제\s*\d+\s*조/);
-  if (!m) return null;
-  const name = m[1].trim().replace(/\s+/g, ' ');
-  return name.length >= 2 && name.length <= 30 ? name : null;
+  // 조문번호의 가지번호('의2' 등)까지 소비해야 한다 — 안 그러면 거부된 후보의 '의2'가
+  // 다음 후보 텍스트 앞에 그대로 남아 '의2 및 부가가치세법'처럼 다음 매치까지 오염시킨다.
+  const matches = String(text || '').matchAll(/([가-힣][가-힣A-Za-z0-9·ㆍ\s]{1,28}?(?:법률|법|령|규칙))\s*제\s*\d+\s*조(?:\s*의\s*\d+)?/g);
+  for (const m of matches) {
+    const name = m[1].trim().replace(/\s+/g, ' ').replace(LEADING_FILLER_RE, '');
+    if (name.length < 2 || name.length > 30) continue;
+    if (GENERIC_LAW_REF_RE.test(name)) continue;
+    const tokens = name.split(' ');
+    const lastToken = tokens[tokens.length - 1];
+    const prevToken = tokens.length > 1 ? tokens[tokens.length - 2] : null;
+    // suffix 단어 자체가 짧으면(법/법률/령/규칙류, 3자 이하) 그 앞 토큰이 조사로 끝날 때
+    // '…은/는/을 법' 같은 문장 일부일 가능성이 높아 법령명으로 보지 않는다.
+    if (lastToken.length <= 3 && prevToken && PARTICLE_BEFORE_SUFFIX_RE.test(prevToken)) continue;
+    return name;
+  }
+  return null;
 }
 
 // 답변에서 특정 헤더 섹션만 추출 (핵심 결론/상세 해설 등)
