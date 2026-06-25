@@ -1762,18 +1762,53 @@ export async function POST(req) {
         let { answerText } = await generate(MAX_STEPS);
         mark('generate done');
 
+        // 보충 패스(coverage repair) — judge보다 먼저, 빠진 출처 버킷만 1회 병렬 조회한다.
+        // 프롬프트(세무 리서치 프로토콜)는 누락 '빈도'만 줄일 뿐 보장은 못 하므로, 서버가 직접
+        // 빠진 버킷을 보충해 judge가 '불완전 근거' 상태에서 먼저 평가/재작성하는 낭비를 막는다.
+        // 재도구화 방지: 이 보충은 딱 1회만(coverageRepairDone) 하고, 이후 coverage가 미충족이어도
+        // 다시 도구를 호출하지 않는다(최종 경고로만 표시) → 무한 재조회 차단.
+        let coverage = computeCoverage(stats);
+        let coverageRepairDone = false;
+        if (isHighRiskLegalQuestion(stats.question) && !hasRequiredResearchCoverage(coverage)
+            && (deadline - Date.now()) > REWRITE_FULL_REMAINING_MS) {
+          const miss = [];
+          if (!coverage.admin.checked) {
+            miss.push('과세관청 해석 — search_nts_taxlaw로 국세청 질의회신·기재부 세법해석 검색(본문 확인)');
+          }
+          if (!coverage.tribunal.checked && !coverage.precedent.checked) {
+            miss.push('조세심판원 — search_decisions(domain="tax_tribunal"); 그리고 법원 판례·법제처 해석례 — search_decisions(domain="precedent")와 (domain="interpretation")');
+          }
+          const repairMsg =
+            `직전 답변은 출처 검토 폭이 부족하다. 아래 '빠진 출처 버킷만' 같은 턴에 한꺼번에(병렬) 조회한 뒤, ` +
+            `그 결과를 반영해 지정된 ===해설=== / ===관련법령=== 형식으로 한국어로 다시 작성하라. 새로 조회할 버킷:\n- ${miss.join('\n- ')}\n` +
+            `결과가 0건이면 '현재 조회 범위에서는 확인하지 못함'으로 명시하라. 이미 확인한 버킷은 다시 조회하지 말 것.`;
+          convo.push({ role: 'assistant', content: answerText });
+          convo.push({ role: 'user', content: repairMsg });
+          send({ status: 'researching' });
+          send({ revising: true });   // 원본은 화면에 유지(폐기 신호 없이)하고 보충 조회 진행만 표시
+          try {
+            const repaired = await generate(REWRITE_STEPS, false, true);  // 도구 ON, 토큰 비스트리밍
+            if (repaired.answerText) answerText = repaired.answerText;
+          } catch (e) {
+            console.warn('[WARN] coverage repair 실패(원본 유지):', e?.name, e?.message);
+          }
+          coverageRepairDone = true;
+          coverage = computeCoverage(stats);   // 보충 후 재산출
+          mark('coverage repair done');
+        }
+
         // 결정적 검사(항상 실행) + 소프트 신호(judge와 무관하게 재작성 강제)
         const det = evaluateIntegrity(answerText, stats);
         const softReasons = [];
         if (hasConclusionContradiction(answerText)) {
           softReasons.push('핵심 결론이 상세 해설의 위반·미충족 판단과 모순됨(긍정 단정 ↔ 본문 부정)');
         }
-        // 해석 쟁점은 다출처(과세관청해석+조세심판원/판례)를 '버킷'으로 검토해야 한다.
-        // 한 버킷만 보고 닫으면(예: 국세청 RAG만, 또는 판례만) 재작성으로 빠진 버킷을 마저 조회시킨다.
-        // checked=ok|empty라 데이터 없는 버킷은 0건으로 충족되어 무한 미충족을 막는다.
-        const coverage = computeCoverage(stats);
+        // 해석 쟁점은 다출처(과세관청해석+조세심판원/판례)를 '버킷'으로 검토해야 한다. 위 보충 패스를
+        // 이미 1회 했으면(coverageRepairDone) 더는 재조회로 몰지 않는다(재도구화 방지). 보충을 못 한
+        // 경우(시간 부족 등)에만 기존 재작성 경로로 빠진 버킷을 마저 조회시킨다. coverage는 위에서
+        // 산출(보충 후 재산출)된 값을 그대로 쓴다.
         const missingDecisionLookup =
-          isHighRiskLegalQuestion(stats.question) && !hasRequiredResearchCoverage(coverage);
+          !coverageRepairDone && isHighRiskLegalQuestion(stats.question) && !hasRequiredResearchCoverage(coverage);
         if (missingDecisionLookup) {
           const miss = [];
           if (!coverage.admin.checked) miss.push('기재부/국세청 해석(search_nts_taxlaw)');
