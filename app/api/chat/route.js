@@ -453,8 +453,13 @@ async function runKifrsSearch({ query, doc_type, std_no, top_k }) {
           ? `일자: ${r.date || '-'} | 관련기준: ${r.related_std || '-'}`
           : `기준서: ${r.std_no || '-'} | 섹션: ${r.heading_path || '-'}` + (r.para_range ? ` (문단 ${r.para_range})` : '')) + simTxt;
         // 기준서번호(예: 제1115호)를 KASB 딥링크용 숫자로 정규화해 url을 만든다(프론트 kifrsStdNo와 동일 규칙).
-        // QnA 행은 std_no가 null이고 관련기준이 related_std에 있으므로 둘 다 본다.
-        const stdDigits = String(r.std_no || r.related_std || '').match(/\d{3,4}/)?.[0] || null;
+        // QnA 행은 std_no가 null이고 관련기준이 related_std에 여러 기준서(예: "제1115호, 제1016호")가
+        // 적혀 있을 수 있으므로, 검증용으로는 첫 번째만이 아니라 전부 모은다(stdDigitsAll).
+        const stdDigitsAll = [...new Set(
+          [...String(r.std_no || '').matchAll(/\d{3,4}/g), ...String(r.related_std || '').matchAll(/\d{3,4}/g)]
+            .map((m) => m[0])
+        )];
+        const stdDigits = stdDigitsAll[0] || null;   // url 생성 등 단일 식별용(대표값)
         sources.push({
           kind: 'kifrs',
           // 충돌 없는 고유키: kifrs_chunks PK가 (doc_id, chunk_index)이므로 이를 그대로 id로 쓴다.
@@ -465,10 +470,11 @@ async function runKifrsSearch({ query, doc_type, std_no, top_k }) {
           icon: '📘',
           url: stdDigits ? `https://db.kasb.or.kr/s/${stdDigits}/std` : 'https://db.kasb.or.kr/standard/',
           meta: citation,
-          // 검증용 기준서번호 숫자(정확일치 비교에 사용).
+          // 검증용 기준서번호 숫자(정확일치 비교에 사용). related_std에 여러 기준서가 적힌 QnA를 위해 배열로 둔다.
           stdDigits,
+          stdDigitsAll,
           // 인용 검증용: 기준서번호(숫자)와 원문 표기를 담는다.
-          refIds: [stdDigits, r.std_no, r.related_std].filter(Boolean).map(normalizeId),
+          refIds: [...stdDigitsAll, r.std_no, r.related_std].filter(Boolean).map(normalizeId),
           stdNo: r.std_no || null,
           partial: isPartial,
         });
@@ -555,7 +561,11 @@ async function runGetKifrsPassage({ doc_id, chunk_index, window }) {
     const head = data.find((r) => Number(r.chunk_index) === idx) || data[0];
     const docTypeLabel = { standard: '기준서 본문', interpretation: '해석서', qna: '회계 질의회신' };
     const source = `K-IFRS ${docTypeLabel[head.doc_type] || head.doc_type || ''}`.trim();
-    const stdDigits = String(head.std_no || head.related_std || '').match(/\d{3,4}/)?.[0] || null;
+    const stdDigitsAll = [...new Set(
+      [...String(head.std_no || '').matchAll(/\d{3,4}/g), ...String(head.related_std || '').matchAll(/\d{3,4}/g)]
+        .map((m) => m[0])
+    )];
+    const stdDigits = stdDigitsAll[0] || null;
     const total = Number(head.chunk_total) || null;
     // window로 일부 구간만 가져온 것이므로, 문서 전체를 못 덮었으면 발췌로 표시한다.
     const passagePartial = total ? data.length < total : true;
@@ -571,7 +581,7 @@ async function runGetKifrsPassage({ doc_id, chunk_index, window }) {
       label: source, icon: '📘',
       url: stdDigits ? `https://db.kasb.or.kr/s/${stdDigits}/std` : 'https://db.kasb.or.kr/standard/',
       meta: `${citation} · 문맥 chunk ${lo}~${hi}`,
-      stdDigits, refIds: [stdDigits, head.std_no, head.related_std].filter(Boolean).map(normalizeId),
+      stdDigits, stdDigitsAll, refIds: [...stdDigitsAll, head.std_no, head.related_std].filter(Boolean).map(normalizeId),
       stdNo: head.std_no || null, partial: passagePartial,
     }];
     const text =
@@ -916,8 +926,8 @@ function evaluateIntegrity(answerText, stats) {
   if (/📘\s*\[K-IFRS\]/.test(answerText)) {
     const retrievedStdDigits = new Set(
       (Array.isArray(stats.sources) ? stats.sources : [])
-        .filter((s) => s.kind === 'kifrs' && s.stdDigits)
-        .map((s) => s.stdDigits)
+        .filter((s) => s.kind === 'kifrs')
+        .flatMap((s) => (Array.isArray(s.stdDigitsAll) && s.stdDigitsAll.length ? s.stdDigitsAll : [s.stdDigits]).filter(Boolean))
     );
     if (retrievedStdDigits.size) {
       const cited = [...new Set([...answerText.matchAll(/제\s*(\d{4})\s*호/g)].map((m) => m[1]))];
@@ -1032,7 +1042,9 @@ function annotateLawLinks(lawLinks, sources) {
     if (stdMatch) {
       // K-IFRS 기준서번호는 '정확히 같은 자리수 숫자'로만 검증(부분일치 금지: 115 ≠ 1115).
       const digits = stdMatch[1];
-      verified = kifrsSources.some((s) => s.stdDigits && s.stdDigits === digits);
+      verified = kifrsSources.some((s) =>
+        (Array.isArray(s.stdDigitsAll) && s.stdDigitsAll.length ? s.stdDigitsAll : [s.stdDigits]).includes(digits)
+      );
     } else {
       // 법령 조문은 조문번호가 같고 법령명이 '정확히'(공백 무시) 일치할 때만 검증.
       // 법령명을 못 뽑은 출처(s.lawName=null)나 한쪽이 비면, 다른 법령의 같은 조문번호로
