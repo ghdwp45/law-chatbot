@@ -1021,7 +1021,7 @@ function ensureAnswerFormat(answerText) {
 // 관련법령 링크를 서버에서 파싱·검증해 구조화 데이터로 만든다.
 // 프론트가 done.full 문자열을 직접 파싱하지 않고 이 배열을 그대로 쓰도록 하기 위함(안정적 계약).
 // 구조화 블록(===관련법령===)이 비었으면 해설 본문에서 '법령명+조문' 인용을 추출하는 폴백을 둔다.
-function parseLawLinks(answerText) {
+function parseLawLinks(answerText, sources) {
   const text = String(answerText || '');
   const links = [];
   const seen = new Set();
@@ -1042,12 +1042,24 @@ function parseLawLinks(answerText) {
     });
   }
 
-  // 폴백: 구조화 블록이 비면 해설 본문에서 인용 법령을 추출(AI가 표를 안 채운 경우 대비).
-  if (links.length === 0) {
+  // 폴백: 구조화 블록이 비어도/비어있지 않아도 항상 해설 본문에서 인용 법령을 추가 추출한다.
+  // (AI가 표를 안 채운 경우뿐 아니라, 표를 일부만 채워 본문에서 언급한 조문 일부가
+  // ===관련법령===에서 누락되는 경우도 보강된다.) 단, 이 정규식은 "같은 법"·"같은 시행령"처럼
+  // 공백 없는 자기참조나 본문 예시 조문까지 법령명으로 잡는 한계가 있으므로, 실제로 조회된
+  // 출처 레지스트리(sources)의 조문번호와 일치할 때만 채택하고, 그 출처의 정확한 lawName으로
+  // 교체한다(레지스트리에 없는 조문번호이거나 같은 조문번호가 여러 법령에 걸쳐 있으면 보수적으로
+  // 버린다 — 오검증·중복 배지보다 누락이 덜 해롭다는 기존 검증 철학과 동일).
+  {
+    const lawSources = Array.isArray(sources) ? sources.filter((s) => s.kind === 'law') : [];
     const body = text.match(/===해설===([\s\S]*?)===해설끝===/)?.[1] || text;
     const re = /([가-힣]{2,}(?:법|법률|령|규칙|예규|고시|기준))\s*(제\d+조(?:의\d+)?)/g;
     let m;
-    while ((m = re.exec(body)) !== null) push(m[1], m[2], '');
+    while ((m = re.exec(body)) !== null) {
+      const norm = normalizeArticleNo(m[2]);
+      const matches = lawSources.filter((s) => s.articleNo === norm && s.lawName);
+      const uniqueNames = new Set(matches.map((s) => s.lawName));
+      if (uniqueNames.size === 1) push(matches[0].lawName, m[2], '');
+    }
   }
   return links;
 }
@@ -1805,7 +1817,7 @@ export async function POST(req) {
         // 관련법령을 서버에서 파싱한 뒤, 레지스트리(실제 조회 출처)와 대조해 verified 플래그를 단다.
         // sources는 도구가 실제로 돌려준 출처(국세청·기재부·K-IFRS·판례·법령원문)를 구조화한 배열로,
         // 프론트 우측 패널이 모델이 쓴 글자가 아니라 이 배열을 근거로 출처를 표시한다.
-        const lawLinks = annotateLawLinks(parseLawLinks(answerText), stats.sources);
+        const lawLinks = annotateLawLinks(parseLawLinks(answerText, stats.sources), stats.sources);
         const sources = buildSourcesForClient(stats.sources);
         const okDone = send({ done: true, full: answerText, lawLinks, sources });
         // 진단: 최종 전송이 실제 enqueue됐는지 + abort 여부 (운영 로그에서 항상 보임)
