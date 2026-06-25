@@ -251,6 +251,39 @@ function applyRelevanceFloor(rows, minSim) {
   return { kept, topSim };
 }
 
+// 세목(tlaw) 약칭→정식명칭 정규화. DB는 정식명칭(예: '부가가치세')으로 저장돼 있고 RPC가 정확일치
+// (c.tlaw = filter_tlaw)하므로, 모델이 약칭('부가세')을 넣으면 0건이 된다. 흔한 약칭만 매핑한다.
+// 주의: '증권거래세법'·'조세범처벌법'·'금융실명법'·'지방세법'처럼 DB값 자체가 '법'으로 끝나는 세목이
+// 있으므로 '법' 일괄 제거 같은 generic 변환은 하지 않고, 안전한 명시적 매핑만 둔다.
+const TLAW_ALIASES = {
+  '부가세': '부가가치세', '부가': '부가가치세', '부가가치세법': '부가가치세',
+  '법인세법': '법인세',
+  '조특': '조세특례', '조특법': '조세특례', '조세특례제한법': '조세특례',
+  '국기': '국세기본', '국세기본법': '국세기본',
+  '국조': '국제조세', '국제조세조정법': '국제조세',
+  '국징': '국세징수', '국세징수법': '국세징수',
+  '주세법': '주세',
+};
+function normalizeTlaw(tlaw) {
+  if (!tlaw) return null;
+  const t = String(tlaw).trim();
+  if (!t) return null;
+  return TLAW_ALIASES[t] || t;
+}
+
+// 기준서번호 정규화: '제1115호'·'1115호'·'제 1115 호'·'1115' → '제1115호'(DB std_no 표기).
+// '제…호' 형태를 먼저 잡고, 없으면 순수 3~4자리 숫자만 변환한다. 그 외(연도 섞인 문자열 등)는
+// 첫 숫자를 함부로 기준서번호로 오인하지 않도록 원본을 그대로 둔다(예: '2024년 제1115호'는 1115를 잡음).
+function normalizeStdNo(std) {
+  if (!std) return null;
+  const s = String(std).trim();
+  if (!s) return null;
+  const m = s.match(/제?\s*(\d{3,4})\s*호/);
+  if (m) return `제${m[1]}호`;
+  if (/^\d{3,4}$/.test(s)) return `제${s}호`;
+  return s;
+}
+
 async function runNtsSearch({ query, tlaw, top_k }) {
   try {
     const signal = AbortSignal.timeout(TOOL_TIMEOUT_MS);
@@ -265,7 +298,11 @@ async function runNtsSearch({ query, tlaw, top_k }) {
     // 자연어 문장 전체가 아니라 문장에서 뽑아낸 문서번호만 넘긴다. RPC가 qstn_no/reply_no를
     // ILIKE '%query%'로 비교하므로 문장 전체를 주면(저장된 번호에 그 문장이 들어있을 리 없어) 항상 0건.
     let docnoRows = [];
-    const docNoMatch = query.match(DOC_NO_PATTERN);
+    const trimmedQuery = String(query).trim();
+    const docNoMatch = trimmedQuery.match(DOC_NO_PATTERN);
+    // 질의가 사실상 '문서번호만'(숫자·하이픈·공백만)이면 임베딩+하이브리드를 건너뛰고 정확검색만 한다.
+    // 임베딩 API 호출(지연·비용)을 아끼는 단축경로 — 숫자열에 의미 임베딩을 거는 건 어차피 효과가 약하다.
+    const isPureDocNo = !!docNoMatch && /^[\d\s\-]+$/.test(trimmedQuery);
     if (docNoMatch) {
       const { data: docnoData } = await supabase
         .rpc('match_nts_chunks_by_docno', { query_text: docNoMatch[0], match_count: matchCount })
@@ -273,34 +310,46 @@ async function runNtsSearch({ query, tlaw, top_k }) {
       docnoRows = docnoData || [];
     }
 
-    const emb = await getGenaiClient().models.embedContent({
-      model: NTS_EMBED_MODEL,
-      contents: query,
-      config: { taskType: 'RETRIEVAL_QUERY', outputDimensionality: NTS_EMBED_DIM, abortSignal: signal },
-    });
-    const queryEmbedding = emb.embeddings[0].values;
-    const { data, error } = await getSupabase().rpc('match_nts_chunks_hybrid', {
-      query_embedding: queryEmbedding,
-      query_text: query,
-      match_count: matchCount,
-      filter_tlaw: tlaw || null,
-    }).abortSignal(signal);
-    if (error) return { __error: true, message: `nts 검색 실패: ${error.message}` };
-
-    // 관련도 문턱: 하이브리드 결과(코사인 유사도 보유 행)에서 문턱 미만을 거른다.
-    // 문서번호 정확검색 결과(docnoRows)는 코사인 유사도가 없고 정확 일치라 거르지 않는다.
-    const { kept: hybridRows, topSim } = applyRelevanceFloor(data || [], NTS_MIN_SIM);
+    let hybridRows = [];
+    let topSim = null;
+    let hadHybridData = false;
+    if (!isPureDocNo) {
+      const emb = await getGenaiClient().models.embedContent({
+        model: NTS_EMBED_MODEL,
+        contents: query,
+        config: { taskType: 'RETRIEVAL_QUERY', outputDimensionality: NTS_EMBED_DIM, abortSignal: signal },
+      });
+      const queryEmbedding = emb.embeddings[0].values;
+      const { data, error } = await getSupabase().rpc('match_nts_chunks_hybrid', {
+        query_embedding: queryEmbedding,
+        query_text: query,
+        match_count: matchCount,
+        filter_tlaw: normalizeTlaw(tlaw),   // 세목 약칭('부가세') → 정식명칭('부가가치세')
+      }).abortSignal(signal);
+      if (error) return { __error: true, message: `nts 검색 실패: ${error.message}` };
+      hadHybridData = (data || []).length > 0;
+      // 관련도 문턱: 하이브리드 결과(코사인 유사도 보유 행)에서 문턱 미만을 거른다.
+      // 문서번호 정확검색 결과(docnoRows)는 코사인 유사도가 없고 정확 일치라 거르지 않는다.
+      const floored = applyRelevanceFloor(data || [], NTS_MIN_SIM);
+      hybridRows = floored.kept;
+      topSim = floored.topSim;
+    }
 
     // 문서번호 정확검색 결과를 앞에 두고, 하이브리드 검색 결과 중 중복(doc_id+chunk_index)을 제거해 합친다.
     const seen = new Set(docnoRows.map((r) => `${r.doc_id}:${r.chunk_index}`));
     const merged = [...docnoRows, ...hybridRows.filter((r) => !seen.has(`${r.doc_id}:${r.chunk_index}`))];
 
     if (merged.length === 0) {
-      // 원본엔 결과가 있었는데 문턱으로 전부 걸러졌으면, 관련도 낮음을 명시해 garbage 인용을 막는다.
-      const flooredOut = (data || []).length > 0 && hybridRows.length === 0 && docnoRows.length === 0;
-      const text = flooredOut
-        ? `[검색 결과 0건] 질의와 충분히 관련된(코사인 유사도 ≥ ${NTS_MIN_SIM}) 국세청·기재부 질의회신 자료가 없습니다(최고 유사도 ${topSim === null ? 'N/A' : topSim.toFixed(3)}). 키워드를 바꿔 재검색하거나, 관련 실무해석이 확인되지 않는다고 보고하세요.`
-        : '[검색 결과 0건] 해당 조건에 맞는 국세청 질의회신 자료가 없습니다.';
+      let text;
+      if (isPureDocNo) {
+        text = `[검색 결과 0건] 문서번호 '${trimmedQuery}'에 해당하는 국세청·기재부 질의회신을 찾지 못했습니다. 번호를 다시 확인하거나 핵심 키워드로 검색하세요.`;
+      } else {
+        // 원본엔 결과가 있었는데 문턱으로 전부 걸러졌으면, 관련도 낮음을 명시해 garbage 인용을 막는다.
+        const flooredOut = hadHybridData && hybridRows.length === 0 && docnoRows.length === 0;
+        text = flooredOut
+          ? `[검색 결과 0건] 질의와 충분히 관련된(코사인 유사도 ≥ ${NTS_MIN_SIM}) 국세청·기재부 질의회신 자료가 없습니다(최고 유사도 ${topSim === null ? 'N/A' : topSim.toFixed(3)}). 키워드를 바꿔 재검색하거나, 관련 실무해석이 확인되지 않는다고 보고하세요.`
+          : '[검색 결과 0건] 해당 조건에 맞는 국세청 질의회신 자료가 없습니다.';
+      }
       return { isError: false, content: [{ type: 'text', text }] };
     }
     const rows = merged.slice(0, matchCount);
@@ -329,10 +378,11 @@ async function runNtsSearch({ query, tlaw, top_k }) {
         const simTxt = hasSim ? ` | 관련도(코사인): ${r.cos_sim.toFixed(3)}` : '';
         sources.push({
           kind: 'nts',
+          mof: isMof,                       // 기재부 세법해석 여부(🏛️ 태그 검증·아이콘 구분용)
           id: `nts:${r.doc_id}`,
           title: r.title || '(제목 없음)',
           label: source,
-          icon: '🗂️',
+          icon: isMof ? '🏛️' : '🗂️',
           url,
           meta: `문서ID ${r.doc_id} · ${r.tlaw || '세목미상'} · ${r.prod_date || '일자미상'}` + (hasSim ? ` · 관련도 ${r.cos_sim.toFixed(2)}` : ''),
           // 인용 검증용 식별자: 문서번호(질의/회신)를 정규화해 담는다.
@@ -369,17 +419,19 @@ async function runKifrsSearch({ query, doc_type, std_no, top_k }) {
       config: { taskType: 'RETRIEVAL_QUERY', outputDimensionality: NTS_EMBED_DIM, abortSignal: signal },
     });
     const queryEmbedding = emb.embeddings[0].values;
+    // std_no를 한 번만 정규화해 필터·문턱 면제 판정에 같은 값을 쓴다(공백문자열 등 엣지에서 불일치 방지).
+    const normalizedStdNo = normalizeStdNo(std_no);   // '1115'·'1115호' → '제1115호'(DB std_no 표기)
     const { data, error } = await getSupabase().rpc('match_kifrs_chunks_hybrid', {
       query_embedding: queryEmbedding,
       query_text: query,
       match_count: matchCount,
       filter_doc_type: doc_type || null,
-      filter_std_no: std_no || null,
+      filter_std_no: normalizedStdNo,
     }).abortSignal(signal);
     if (error) return { __error: true, message: `kifrs 검색 실패: ${error.message}` };
-    // std_no로 특정 기준서를 콕 집어 검색했으면 관련도 문턱을 면제한다(사용자 지정 범위 보존).
-    // NTS의 문서번호 정확검색을 문턱에서 제외하는 것과 같은 취지.
-    const { kept: rows, topSim } = applyRelevanceFloor(data || [], std_no ? 0 : KIFRS_MIN_SIM);
+    // 특정 기준서(std_no)를 콕 집어 검색했으면 관련도 문턱을 면제한다(사용자 지정 범위 보존).
+    // NTS의 문서번호 정확검색을 문턱에서 제외하는 것과 같은 취지. 정규화 결과 기준으로 판단해 필터와 일치시킨다.
+    const { kept: rows, topSim } = applyRelevanceFloor(data || [], normalizedStdNo ? 0 : KIFRS_MIN_SIM);
     if (rows.length === 0) {
       const flooredOut = (data || []).length > 0;
       const text = flooredOut
@@ -458,8 +510,8 @@ async function runGetNtsDocument({ doc_id }) {
     const truncatedDoc = data.length < total;
     const fullText = data.map((r) => r.content).join('\n');
     const sources = [{
-      kind: 'nts', id: `nts:${head.doc_id}`, title: head.title || '(제목 없음)',
-      label: source, icon: '🗂️', url,
+      kind: 'nts', mof: isMof, id: `nts:${head.doc_id}`, title: head.title || '(제목 없음)',
+      label: source, icon: isMof ? '🏛️' : '🗂️', url,
       meta: `문서ID ${head.doc_id} · ${head.tlaw || '세목미상'} · ${head.prod_date || '일자미상'} · 전문(${data.length}/${total}청크)`,
       refIds: [head.qstn_no, head.reply_no].filter(Boolean).map(normalizeId),
       partial: truncatedDoc,
@@ -594,7 +646,7 @@ ${earlyStop}
 - (예시) "전월 26일~당월 25일을 월합계 세금계산서 1장으로 발급" 질문은 위 원칙의 적용 사례다. 부가가치세법 제34조 제3항의 월합계 특례는 '1역월(1일~말일)' 또는 '그 달 안의 임의 기간'만 허용하므로 두 역월에 걸친 구간은 한 장으로 묶을 수 없고, 계속적 용역의 공급시기 문제와는 구분해 다룬다. 이 예시의 결론을 다른 사안에 그대로 옮기지 말고, 위 일반 원칙과 실제 조회 근거로 각 질문을 판단한다.
 
 [출처 태그 - 필수]
-📋 [법령 원문] / ⚖️ [판례·해석례](사건번호·예규번호 명시) / 🗂️ [국세청 질의회신](문서ID·생산일자·세목 명시, 도구 결과에 '원문링크:'가 있으면 그 URL을 그대로 첨부) / 📘 [K-IFRS](기준서번호·문단 또는 QnA 일자 명시) / 💡 [AI 해설] / ⚠️ [AI 추정]
+📋 [법령 원문] / ⚖️ [판례·해석례](사건번호·예규번호 명시) / 🗂️ [국세청 질의회신](문서ID·생산일자·세목 명시, 도구 결과에 '원문링크:'가 있으면 그 URL을 그대로 첨부) / 🏛️ [기재부 세법해석](기획재정부 부서별 세법해석 사례 — search_nts_taxlaw 결과의 '출처:'가 '기획재정부 세법해석'인 항목은 🗂️가 아니라 이 태그를 쓰고 문서번호·생산일자 명시) / 📘 [K-IFRS](기준서번호·문단 또는 QnA 일자 명시) / 💡 [AI 해설] / ⚠️ [AI 추정]
 - 별표(★)·신뢰도 점수 표시 금지.
 
 [답변 형식]
@@ -844,8 +896,16 @@ function evaluateIntegrity(answerText, stats) {
   // search_decisions(nts) 색인은 더 이상 출처로 등록하지 않으므로, '판례/색인 성공'이 국세청
   // 본문 인용 검증으로 새던 구멍(#1 잔여)이 막힌다.
   const hasKind = (kind) => Array.isArray(stats.sources) && stats.sources.some((s) => s.kind === kind);
-  if (/🗂️\s*\[국세청 질의회신\]/.test(answerText) && !hasKind('nts')) {
-    warnings.push('실제 조회된 국세청·기재부 질의회신 본문 출처 없이 [국세청 질의회신] 인용');
+  const hasMof = Array.isArray(stats.sources) && stats.sources.some((s) => s.kind === 'nts' && s.mof);
+  // 🗂️ [국세청 질의회신]은 '비기재부' nts 출처로만 검증한다(기재부 출처만 있는데 국세청으로
+  // 잘못 라벨링한 답변이 통과되던 빈틈 차단 — 기재부는 🏛️로 표기하도록 프롬프트가 지시).
+  const hasNtsNonMof = Array.isArray(stats.sources) && stats.sources.some((s) => s.kind === 'nts' && !s.mof);
+  if (/🗂️\s*\[국세청 질의회신\]/.test(answerText) && !hasNtsNonMof) {
+    warnings.push('실제 조회된 국세청 질의회신 본문 출처 없이 [국세청 질의회신] 인용');
+  }
+  // 기재부 세법해석 전용 태그(🏛️)는 실제 기재부 출처(nts·mof)로만 검증한다.
+  if (/🏛️\s*\[기재부/.test(answerText) && !hasMof) {
+    warnings.push('실제 조회된 기재부 세법해석 출처 없이 [기재부 세법해석] 인용');
   }
   if (/📘\s*\[K-IFRS\]/.test(answerText) && !hasKind('kifrs')) {
     warnings.push('실제 조회된 K-IFRS 출처 없이 [K-IFRS] 인용');
