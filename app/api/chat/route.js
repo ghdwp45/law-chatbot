@@ -418,7 +418,9 @@ async function runKifrsSearch({ query, doc_type, std_no, top_k }) {
           stdNo: r.std_no || null,
           partial: isPartial,
         });
-        return `[결과 ${i + 1}]${partial} ${r.title}\n출처: ${source} | ${citation}\n--- 내용 ---\n${r.content}`;
+        // 조회키: get_kifrs_passage(doc_id, chunk_index)로 앞뒤 문맥을 가져오려면 이 두 값이 필요하다.
+        const fetchKey = `\n조회키(문맥확장용): doc_id=${r.doc_id} | chunk_index=${r.chunk_index}`;
+        return `[결과 ${i + 1}]${partial} ${r.title}\n출처: ${source} | ${citation}${fetchKey}\n--- 내용 ---\n${r.content}`;
       })
       .join('\n\n========\n\n');
     const text =
