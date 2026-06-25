@@ -1044,19 +1044,26 @@ function parseLawLinks(answerText, sources) {
 
   // 폴백: 구조화 블록이 비어도/비어있지 않아도 항상 해설 본문에서 인용 법령을 추가 추출한다.
   // (AI가 표를 안 채운 경우뿐 아니라, 표를 일부만 채워 본문에서 언급한 조문 일부가
-  // ===관련법령===에서 누락되는 경우도 보강된다.) 단, 이 정규식은 "같은 법"·"같은 시행령"처럼
-  // 공백 없는 자기참조나 본문 예시 조문까지 법령명으로 잡는 한계가 있으므로, 실제로 조회된
-  // 출처 레지스트리(sources)의 조문번호와 일치할 때만 채택하고, 그 출처의 정확한 lawName으로
-  // 교체한다(레지스트리에 없는 조문번호이거나 같은 조문번호가 여러 법령에 걸쳐 있으면 보수적으로
-  // 버린다 — 오검증·중복 배지보다 누락이 덜 해롭다는 기존 검증 철학과 동일).
+  // ===관련법령===에서 누락되는 경우도 보강된다.) 단, 이 정규식은 "같은 시행령"처럼 약식 표기나
+  // 본문 예시 조문까지 잡는 한계가 있으므로, 실제로 조회된 출처 레지스트리(sources)의 조문번호와
+  // 일치하면서 "본문에서 잡힌 법령명과도 호환되는"(공백 무시, 한쪽이 다른 쪽을 포함) 출처일
+  // 때만 채택하고, 그 출처의 정확한 lawName으로 교체한다. 조문번호만으로 매칭하면 본문이 인용한
+  // 법(부가가치세법 제86조)을 출처에 있는 다른 법(소득세법 제86조)으로 잘못 바꿔 '검증됨' 배지를
+  // 다는 오검증이 생긴다(레지스트리에 없거나 호환되는 출처가 모호하면 누락이 오검증보다 안전).
   {
     const lawSources = Array.isArray(sources) ? sources.filter((s) => s.kind === 'law') : [];
+    const canon = (x) => String(x || '').replace(/\s+/g, '');
     const body = text.match(/===해설===([\s\S]*?)===해설끝===/)?.[1] || text;
     const re = /([가-힣]{2,}(?:법|법률|령|규칙|예규|고시|기준))\s*(제\d+조(?:의\d+)?)/g;
     let m;
     while ((m = re.exec(body)) !== null) {
+      const captured = canon(m[1]);
       const norm = normalizeArticleNo(m[2]);
-      const matches = lawSources.filter((s) => s.articleNo === norm && s.lawName);
+      const matches = lawSources.filter((s) => {
+        if (s.articleNo !== norm || !s.lawName) return false;
+        const reg = canon(s.lawName);
+        return reg.includes(captured) || captured.includes(reg);
+      });
       const uniqueNames = new Set(matches.map((s) => s.lawName));
       if (uniqueNames.size === 1) push(matches[0].lawName, m[2], '');
     }
