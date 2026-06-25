@@ -11,6 +11,9 @@ const EXAMPLES = [
 const TAG_GUIDE = [
   { icon: "📋", label: "법령원문", desc: "법제처 원문 직접 인용" },
   { icon: "⚖️", label: "판례/해석례", desc: "법제처 판례·해석례 데이터 기반" },
+  { icon: "🗂️", label: "국세청 질의회신", desc: "국세청 세법 질의회신 사례" },
+  { icon: "🏛️", label: "기재부 세법해석", desc: "기획재정부 세법해석 사례" },
+  { icon: "📘", label: "K-IFRS", desc: "한국채택국제회계기준 기준서·해석서·QnA" },
   { icon: "💡", label: "AI 해설", desc: "원문 데이터를 바탕으로 한 AI 해석" },
   { icon: "⚠️", label: "AI 추정", desc: "원문 없이 AI 학습 데이터만 사용 (참고용으로만 활용, 법제처 원문 확인 권장)" },
 ];

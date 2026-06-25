@@ -910,6 +910,23 @@ function evaluateIntegrity(answerText, stats) {
   if (/📘\s*\[K-IFRS\]/.test(answerText) && !hasKind('kifrs')) {
     warnings.push('실제 조회된 K-IFRS 출처 없이 [K-IFRS] 인용');
   }
+  // K-IFRS는 종류 존재만이 아니라 '인용한 기준서번호'를 실제 조회된 번호와 대조한다.
+  // (제1115호만 조회했는데 답변이 제1016호를 인용하는 식의 무근거 인용 차단.)
+  // 4자리 '제nnnn호'만 본다(K-IFRS 기준서/해석서 번호 형식 — 법령 '제n조'·3자리 고시와 혼동 방지).
+  if (/📘\s*\[K-IFRS\]/.test(answerText)) {
+    const retrievedStdDigits = new Set(
+      (Array.isArray(stats.sources) ? stats.sources : [])
+        .filter((s) => s.kind === 'kifrs' && s.stdDigits)
+        .map((s) => s.stdDigits)
+    );
+    if (retrievedStdDigits.size) {
+      const cited = [...new Set([...answerText.matchAll(/제\s*(\d{4})\s*호/g)].map((m) => m[1]))];
+      const unmatched = cited.filter((d) => !retrievedStdDigits.has(d));
+      if (unmatched.length) {
+        warnings.push(`인용한 K-IFRS 기준서번호 중 실제 조회로 확인되지 않은 것(원문 대조 필요): ${unmatched.slice(0, 5).map((d) => `제${d}호`).join(', ')}`);
+      }
+    }
+  }
   const ids = extractCaseLikeIds(answerText);
   if (ids.length) {
     const ragNums = [...stats.ragDocumentIds];
@@ -1445,8 +1462,11 @@ export async function POST(req) {
                 text = `[호출 한도 초과] 법제처 API 호출이 일시적으로 제한됩니다(429). 추가 조회를 멈추고, 지금까지 확보된 근거만으로 ===해설=== / ===관련법령=== 형식에 맞춰 최종 답변을 작성하세요. 부족한 부분은 '현재 조회 범위에서는 확인하지 못함'으로 보류하세요.`;
                 truncated = false;
               }
-              // 결과 0건은 에러가 아니라 '정상 처리·자료 없음'임을 모델에 명시 → 동일조건 재검색 방지
-              if (cls === 'empty') {
+              // 결과 0건은 에러가 아니라 '정상 처리·자료 없음'임을 모델에 명시 → 동일조건 재검색 방지.
+              // 단, 로컬 RAG 도구(search_nts_taxlaw/search_kifrs_accounting/get_*)는 자체적으로
+              // 더 구체적인 0건 메시지(순수 문서번호 못찾음 / 관련도 낮아 제외됨 / 자료 없음)를 만들므로
+              // 일반 문구로 덮지 않고 그대로 둔다(모델이 원인을 구분할 수 있게).
+              if (cls === 'empty' && !LOCAL_TOOL_NAMES.has(tu.name)) {
                 const dom = tu.input?.domain ? ` domain=${tu.input.domain}` : '';
                 const q = tu.input?.query ? ` query="${tu.input.query}"` : '';
                 text = `[검색 결과 0건]${dom}${q} 해당 조건에 맞는 자료가 없습니다(서버 정상, 데이터 없음). 같은 조건으로 재검색하지 말고, 키워드를 더 넓히거나 다른 도메인으로 검색하거나 현재까지 확인된 근거로 진행하세요.`;
