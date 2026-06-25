@@ -621,6 +621,16 @@ ${earlyStop}
 - 작성 순서: 먼저 상세 해설에서 법령·예규·심판례 검토를 끝내 결론을 도출한 뒤, 그 결과를 핵심 결론에 그대로 옮긴다. 본문에서 '위반·미충족·불가·허용되지 않음·❌·가산세 위험'을 한 번이라도 언급했다면 핵심 결론에 '적법/가능/허용'이라는 단정 표현을 쓰지 않는다.
 - search_decisions 결과가 비거나 부족해도 '해석례가 없다'고 단정하지 말고 '현재 조회 범위에서는 확인하지 못함'으로 표현하며, 키워드를 바꿔 최소 1회 재검색한 뒤에만 그렇게 적는다. 해석쟁점에서 근거를 끝내 못 찾으면 결론을 단정하지 말고 보류한다.
 
+[세무 리서치 프로토콜 - 세금계산서·공급시기·귀속시기·가산세·특례·기간 등 해석 쟁점에 필수]
+회계법인 세무 검토처럼, 아래 4개 출처 버킷을 '각각 독립적으로' 조회한 뒤 종합해 답변한다. 한 버킷에서 결과가 나왔다고 다른 버킷 조회를 생략하지 말 것(예: 국세청 질의회신만 보고, 또는 판례만 보고 답을 닫지 말 것).
+1. 법령 원문: search_law/get_law_text로 법률(필요 시 시행령·시행규칙)의 핵심 조문 확인
+2. 과세관청 해석: search_nts_taxlaw로 국세청 질의회신·기재부 세법해석 검색(본문 확인 — search_decisions의 nts 도메인은 제목·링크뿐이라 이 버킷을 대체하지 못함)
+3. 조세심판원: search_decisions(domain="tax_tribunal")
+4. 법원 판례·법제처 해석례: search_decisions(domain="precedent")와 search_decisions(domain="interpretation")
+- [속도] 위 2~4 검색은 서로 의존하지 않으므로 반드시 같은 어시스턴트 턴에서 한꺼번에(병렬) 호출한다. 법령 mst가 필요한 get_law_text만 search_law 다음 턴에 모아 호출한다.
+- 각 버킷 결과가 0건이면 '현재 조회 범위에서는 확인하지 못함'으로 답변에 명시한다. '빠뜨려서 안 본 것'과 '조회했으나 0건인 것'을 구분해 드러낸다.
+- (검색어 예시) "전월 26일~당월 25일 월합계 세금계산서" 쟁점이라면 search_nts_taxlaw("전월 26일 당월 25일 월합계 세금계산서", tlaw="부가가치세"), search_nts_taxlaw("계속적 용역 공급가액 확정 공급시기", tlaw="부가가치세"), search_decisions("tax_tribunal","월합계 세금계산서 1역월"), search_decisions("precedent","월합계 세금계산서") 처럼 버킷별로 나누어 한 턴에 병렬 조회한다.
+
 [세법 조회 보강 원칙]
 - 세법 질문은 원칙적으로 법률·시행령·시행규칙을 함께 검토한다. 법률 조문만으로 결론이 어려우면 시행령·시행규칙을 추가 조회한다.
 - 결론은 법령 → 시행령 → 시행규칙 → 기재부/국세청 해석 → 심판례·판례 순으로 정리한다.
@@ -1155,6 +1165,19 @@ function buildSourcesForClient(sources) {
     url: s.url || null,
     meta: s.meta || '',
     partial: !!s.partial,
+  }));
+}
+
+// 4버킷 coverage를 프론트 "검토한 출처" 패널용으로 변환. 모델이 써낸 글자가 아니라
+// 서버가 기록한 실제 도구 호출(stats.calls) 기반이라, 모델이 안 본 버킷을 "봤다"고
+// 환각하는 것을 원천 차단한다. status: found(결과있음)/empty(조회했으나 0건)/error(오류)/skipped(미조회).
+function buildCoverageForClient(coverage) {
+  if (!coverage) return null;
+  const status = (b) => (b.hasData ? 'found' : b.checked ? 'empty' : b.errored ? 'error' : 'skipped');
+  return ['law', 'admin', 'tribunal', 'precedent'].map((k) => ({
+    key: k,
+    label: coverage[k].label,
+    status: status(coverage[k]),
   }));
 }
 
@@ -1879,7 +1902,12 @@ export async function POST(req) {
         // 프론트 우측 패널이 모델이 쓴 글자가 아니라 이 배열을 근거로 출처를 표시한다.
         const lawLinks = annotateLawLinks(parseLawLinks(answerText, stats.sources), stats.sources);
         const sources = buildSourcesForClient(stats.sources);
-        const okDone = send({ done: true, full: answerText, lawLinks, sources });
+        // 검토한 출처(버킷별 조회 결과) — 다출처 검토 여부를 사용자가 직접 보게 한다.
+        // 넓이 검증 대상인 고위험 해석질문에서만 노출(단순 질문엔 의미 없는 '미조회' 노이즈 방지).
+        const coverageClient = isHighRiskLegalQuestion(stats.question)
+          ? buildCoverageForClient(coverageFinal)
+          : null;
+        const okDone = send({ done: true, full: answerText, lawLinks, sources, coverage: coverageClient });
         // 진단: 최종 전송이 실제 enqueue됐는지 + abort 여부 (운영 로그에서 항상 보임)
         console.log('[INFO] SSE:', JSON.stringify({
           totalSends: seq, okText, okDone, aborted: clientAborted,

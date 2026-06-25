@@ -49,6 +49,8 @@ export default function Home() {
   // 서버 레지스트리 기반 '실제 조회된 출처'(국세청·기재부·K-IFRS·판례·법령원문).
   // 모델이 써낸 글자가 아니라 검색 도구가 돌려준 결과라, 인용 신뢰의 근거가 된다.
   const [sources, setSources] = useState([]);
+  // 검토한 출처 4버킷(법령/과세관청해석/조세심판원/판례·해석례)의 조회 결과. 서버 기록 기반.
+  const [coverage, setCoverage] = useState(null);
   const [activeArticle, setActiveArticle] = useState(null);
   const chatRef = useRef(null);
   const textareaRef = useRef(null);
@@ -140,6 +142,7 @@ export default function Home() {
     setRevising(false);
     setLawLinks([]);   // 새 질문 시작 시 이전 답변의 관련 법령을 비운다
     setSources([]);    // 이전 답변의 조회 출처도 비운다
+    setCoverage(null); // 이전 답변의 검토 출처 표시도 비운다
 
     const newMessages = [...messages, { role: "user", content: userText }];
     setMessages(newMessages);
@@ -226,6 +229,8 @@ export default function Home() {
           setLawLinks(finalLinks);
           // 서버가 보낸 '실제 조회된 출처' 배열(구버전 백엔드면 없음 → 빈 배열).
           setSources(Array.isArray(parsed.sources) ? parsed.sources : []);
+          // 검토한 출처 4버킷 결과(고위험 해석질문에서만 서버가 보냄, 아니면 null).
+          setCoverage(Array.isArray(parsed.coverage) ? parsed.coverage : null);
         }
         if (parsed.error) {
           const isOverloaded = parsed.error.toLowerCase().includes("overload");
@@ -278,6 +283,7 @@ export default function Home() {
       setMessages([]);
       setLawLinks([]);
       setSources([]);
+      setCoverage(null);
       setActiveArticle(null);
     }
   };
@@ -401,7 +407,7 @@ export default function Home() {
           </div>
 
           <div style={s.lawContent}>
-            {(lawLinks.length === 0 && sources.length === 0) ? (
+            {(lawLinks.length === 0 && sources.length === 0 && !coverage) ? (
               <div style={s.emptyLaw}>
                 <div style={s.emptyIcon}>⚖️</div>
                 <p style={s.emptyText}>질문하면 관련 법령 링크가<br/>여기에 표시됩니다</p>
@@ -409,6 +415,26 @@ export default function Home() {
               </div>
             ) : (
               <div>
+                {coverage && coverage.length > 0 && (
+                  <div style={s.sourceSection}>
+                    <div style={s.sourceTitle}>🔎 검토한 출처</div>
+                    <div style={s.sourceHint}>이 해석 쟁점에서 AI가 출처 종류별로 실제 조회했는지 표시합니다(서버 기록 기준).</div>
+                    {coverage.map((b, i) => {
+                      const m = {
+                        found:   { icon: "✅", text: "조회됨", color: "#1a7f37" },
+                        empty:   { icon: "➖", text: "조회했으나 0건", color: "#9a6700" },
+                        error:   { icon: "⚠️", text: "조회 오류", color: "#cf222e" },
+                        skipped: { icon: "⬜", text: "미조회", color: "#8c959f" },
+                      }[b.status] || { icon: "⬜", text: b.status, color: "#8c959f" };
+                      return (
+                        <div key={i} style={s.coverageItem}>
+                          <span>{m.icon} {b.label}</span>
+                          <span style={{ color: m.color, fontWeight: 600 }}>{m.text}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 {sources.length > 0 && (
                   <div style={s.sourceSection}>
                     <div style={s.sourceTitle}>🔎 실제 조회된 출처 <span style={s.sourceCount}>{sources.length}</span></div>
@@ -565,6 +591,7 @@ const s = {
   sourceTitle:{fontSize:13,fontWeight:700,color:"#1a1208",marginBottom:4,display:"flex",alignItems:"center",gap:6},
   sourceCount:{fontSize:11,background:"#1a1208",color:"#f5f0e8",padding:"1px 7px",borderRadius:10,fontWeight:500},
   sourceHint:{fontSize:11,color:"#7a6e60",marginBottom:10,lineHeight:1.5},
+  coverageItem:{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,padding:"5px 2px",color:"#3a3228"},
   sourceItem:{display:"block",padding:"10px 12px",border:"1px solid #d4c9b0",borderRadius:8,marginBottom:8,background:"white",textDecoration:"none",color:"inherit"},
   sourceItemTop:{display:"flex",alignItems:"center",gap:6,marginBottom:4},
   sourceIcon:{fontSize:13},
