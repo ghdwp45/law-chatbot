@@ -1044,12 +1044,16 @@ function parseLawLinks(answerText, sources) {
 
   // 폴백: 구조화 블록이 비어도/비어있지 않아도 항상 해설 본문에서 인용 법령을 추가 추출한다.
   // (AI가 표를 안 채운 경우뿐 아니라, 표를 일부만 채워 본문에서 언급한 조문 일부가
-  // ===관련법령===에서 누락되는 경우도 보강된다.) 단, 이 정규식은 "같은 시행령"처럼 약식 표기나
-  // 본문 예시 조문까지 잡는 한계가 있으므로, 실제로 조회된 출처 레지스트리(sources)의 조문번호와
-  // 일치하면서 "본문에서 잡힌 법령명과도 호환되는"(공백 무시, 한쪽이 다른 쪽을 포함) 출처일
-  // 때만 채택하고, 그 출처의 정확한 lawName으로 교체한다. 조문번호만으로 매칭하면 본문이 인용한
-  // 법(부가가치세법 제86조)을 출처에 있는 다른 법(소득세법 제86조)으로 잘못 바꿔 '검증됨' 배지를
-  // 다는 오검증이 생긴다(레지스트리에 없거나 호환되는 출처가 모호하면 누락이 오검증보다 안전).
+  // ===관련법령===에서 누락되는 경우도 보강된다.) 단, 이 정규식은 "현행 시행령"처럼 약식 표기나
+  // 본문 예시 조문까지 잡는 한계가 있으므로, 실제로 조회된 출처 레지스트리(sources)의 조문번호가
+  // 일치하면서, 본문에서 잡힌 법령명이 출처 법령명의 "접미(suffix)"이거나 동일할 때만 채택하고
+  // 그 출처의 정확한 lawName으로 교체한다(공백 무시).
+  //   - "시행령"(약식) ⊂ "법인세법 시행령"의 접미 → 채택(법인세법 시행령으로 보강)
+  //   - "법인세법"(본법)은 "법인세법 시행령"의 접미가 아님 → 본법 인용을 시행령으로 잘못
+  //     바꾸지 않음(본법/시행령/시행규칙은 서로 다른 법령이므로 단순 포함관계로 묶으면 안 됨)
+  //   - "부가가치세법 제86조"(본문)를 레지스트리의 "소득세법 제86조"로 바꾸는 타법 오검증도 차단
+  // 조문번호만으로 매칭하거나 양방향 포함으로 매칭하면 위 구분이 무너져 '검증됨' 배지가 잘못 달린다.
+  // (레지스트리에 없거나 접미가 일치하는 출처가 모호하면 누락이 오검증보다 안전.)
   {
     const lawSources = Array.isArray(sources) ? sources.filter((s) => s.kind === 'law') : [];
     const canon = (x) => String(x || '').replace(/\s+/g, '');
@@ -1061,8 +1065,7 @@ function parseLawLinks(answerText, sources) {
       const norm = normalizeArticleNo(m[2]);
       const matches = lawSources.filter((s) => {
         if (s.articleNo !== norm || !s.lawName) return false;
-        const reg = canon(s.lawName);
-        return reg.includes(captured) || captured.includes(reg);
+        return canon(s.lawName).endsWith(captured);
       });
       const uniqueNames = new Set(matches.map((s) => s.lawName));
       if (uniqueNames.size === 1) push(matches[0].lawName, m[2], '');
