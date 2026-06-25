@@ -43,6 +43,9 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [revising, setRevising] = useState(false);   // 검증 후 재작성(다듬기) 중 표시
   const [lawLinks, setLawLinks] = useState([]);
+  // 서버 레지스트리 기반 '실제 조회된 출처'(국세청·기재부·K-IFRS·판례·법령원문).
+  // 모델이 써낸 글자가 아니라 검색 도구가 돌려준 결과라, 인용 신뢰의 근거가 된다.
+  const [sources, setSources] = useState([]);
   const [activeArticle, setActiveArticle] = useState(null);
   const chatRef = useRef(null);
   const textareaRef = useRef(null);
@@ -133,6 +136,7 @@ export default function Home() {
     setActiveArticle(null);
     setRevising(false);
     setLawLinks([]);   // 새 질문 시작 시 이전 답변의 관련 법령을 비운다
+    setSources([]);    // 이전 답변의 조회 출처도 비운다
 
     const newMessages = [...messages, { role: "user", content: userText }];
     setMessages(newMessages);
@@ -217,6 +221,8 @@ export default function Home() {
           // 관련 법령이 없으면 빈 배열로 교체해, 이전 답변의 법령이 남지 않게 한다.
           const finalLinks = Array.isArray(parsed.lawLinks) ? parsed.lawLinks : links;
           setLawLinks(finalLinks);
+          // 서버가 보낸 '실제 조회된 출처' 배열(구버전 백엔드면 없음 → 빈 배열).
+          setSources(Array.isArray(parsed.sources) ? parsed.sources : []);
         }
         if (parsed.error) {
           const isOverloaded = parsed.error.toLowerCase().includes("overload");
@@ -268,6 +274,7 @@ export default function Home() {
     if (confirm("대화 내용을 초기화하시겠습니까?")) {
       setMessages([]);
       setLawLinks([]);
+      setSources([]);
       setActiveArticle(null);
     }
   };
@@ -391,7 +398,7 @@ export default function Home() {
           </div>
 
           <div style={s.lawContent}>
-            {lawLinks.length === 0 ? (
+            {(lawLinks.length === 0 && sources.length === 0) ? (
               <div style={s.emptyLaw}>
                 <div style={s.emptyIcon}>⚖️</div>
                 <p style={s.emptyText}>질문하면 관련 법령 링크가<br/>여기에 표시됩니다</p>
@@ -399,6 +406,33 @@ export default function Home() {
               </div>
             ) : (
               <div>
+                {sources.length > 0 && (
+                  <div style={s.sourceSection}>
+                    <div style={s.sourceTitle}>🔎 실제 조회된 출처 <span style={s.sourceCount}>{sources.length}</span></div>
+                    <div style={s.sourceHint}>AI가 답변 작성에 실제로 조회한 자료입니다(검색 도구 결과 기준).</div>
+                    {sources.map((src, i) => {
+                      const Inner = (
+                        <>
+                          <div style={s.sourceItemTop}>
+                            <span style={s.sourceIcon}>{src.icon}</span>
+                            <span style={s.sourceLabel}>{src.label}</span>
+                            {src.partial && <span style={s.sourcePartial}>발췌</span>}
+                          </div>
+                          <div style={s.sourceItemTitle}>{src.title}</div>
+                          {src.meta && <div style={s.sourceMeta}>{src.meta}</div>}
+                          {src.url && <div style={s.sourceUrl}>🔗 원문 보기 →</div>}
+                        </>
+                      );
+                      return src.url ? (
+                        <a key={i} href={src.url} target="_blank" rel="noopener noreferrer" style={s.sourceItem}>{Inner}</a>
+                      ) : (
+                        <div key={i} style={s.sourceItem}>{Inner}</div>
+                      );
+                    })}
+                  </div>
+                )}
+                {lawLinks.length > 0 && (
+                <>
                 <div style={s.lawNote}>💡 왼쪽 답변의 <strong>조문번호</strong>를 클릭하면 해당 법령이 하이라이트됩니다</div>
                 {lawLinks.map((link, i) => {
                   const key = link.articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
@@ -420,12 +454,15 @@ export default function Home() {
                       <div style={s.lawLinkTop}>
                         <span style={s.lawLinkName}>{link.lawName}</span>
                         <span style={{...s.lawLinkArticle, ...(isActive ? s.lawLinkArticleActive : {})}}>{link.articleNo}</span>
+                        {link.verified && <span style={s.verifiedBadge} title="검색 도구로 실제 조회 확인됨">✓ 조회됨</span>}
                       </div>
                       {link.desc && <div style={s.lawLinkDesc}>{link.desc}</div>}
                       <div style={s.lawLinkUrl}>{urlLabel}</div>
                     </a>
                   );
                 })}
+                </>
+                )}
                 <div style={s.lawDirectSearch}>
                   <div style={s.lawDirectTitle}>📌 직접 검색</div>
                   <a href="https://www.law.go.kr" target="_blank" rel="noopener noreferrer" style={s.lawDirectLink}>
@@ -521,6 +558,19 @@ const s = {
   emptyText:{fontSize:13,color:"#7a6e60",lineHeight:1.8,marginBottom:8},
   emptySubText:{fontSize:11,color:"#aaa",lineHeight:1.7},
   lawNote:{fontSize:11,color:"#7a6e60",marginBottom:12,padding:"8px 12px",background:"#f5f0e8",borderRadius:6,lineHeight:1.6},
+  sourceSection:{marginBottom:18,paddingBottom:14,borderBottom:"1px dashed #d4c9b0"},
+  sourceTitle:{fontSize:13,fontWeight:700,color:"#1a1208",marginBottom:4,display:"flex",alignItems:"center",gap:6},
+  sourceCount:{fontSize:11,background:"#1a1208",color:"#f5f0e8",padding:"1px 7px",borderRadius:10,fontWeight:500},
+  sourceHint:{fontSize:11,color:"#7a6e60",marginBottom:10,lineHeight:1.5},
+  sourceItem:{display:"block",padding:"10px 12px",border:"1px solid #d4c9b0",borderRadius:8,marginBottom:8,background:"white",textDecoration:"none",color:"inherit"},
+  sourceItemTop:{display:"flex",alignItems:"center",gap:6,marginBottom:4},
+  sourceIcon:{fontSize:13},
+  sourceLabel:{fontSize:11,fontWeight:700,color:"#b8922a",letterSpacing:0.3},
+  sourcePartial:{fontSize:10,background:"#f3e6c0",color:"#8a6d1a",padding:"1px 6px",borderRadius:8,fontWeight:600},
+  sourceItemTitle:{fontSize:12,color:"#1a1208",lineHeight:1.5,marginBottom:3,fontWeight:500},
+  sourceMeta:{fontSize:11,color:"#7a6e60",lineHeight:1.5},
+  sourceUrl:{fontSize:11,color:"#b8922a",fontWeight:500,marginTop:4},
+  verifiedBadge:{fontSize:10,background:"#e3f3e6",color:"#1e7a3c",padding:"1px 6px",borderRadius:8,fontWeight:700,marginLeft:2},
   lawLink:{display:"block",padding:"14px 16px",border:"1px solid #d4c9b0",borderRadius:8,marginBottom:10,background:"white",textDecoration:"none",color:"inherit",transition:"all 0.2s"},
   lawLinkActive:{border:"2px solid #c0392b",background:"#fff8f8",animation:"highlight-pulse 1.5s ease-in-out"},
   highlightBadge:{fontSize:10,color:"#c0392b",fontWeight:700,marginBottom:6,letterSpacing:0.5},
