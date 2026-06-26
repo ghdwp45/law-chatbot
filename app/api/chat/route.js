@@ -895,6 +895,14 @@ function extractLawNameFromText(text) {
     // suffix 단어 자체가 짧으면(법/법률/령/규칙류, 3자 이하) 그 앞 토큰이 조사로 끝날 때
     // '…은/는/을 법' 같은 문장 일부일 가능성이 높아 법령명으로 보지 않는다.
     if (lastToken.length <= 3 && prevToken && PARTICLE_BEFORE_SUFFIX_RE.test(prevToken)) continue;
+    // 띄어쓴 단독 접미사(법/법률/령/규칙)로 끝나는 다중어절 후보는, 그 앞 토큰이 법령명
+    // 연결어('…에 관한/관련/대한 법률', '… 및/등의 …')가 아니면 거의 항상 문장 일부다.
+    //   - '…사업자가 …받았으나 법 제81조' → '…받았으나 법'  (단독 '법')
+    //   - '…정하는 법률 제2조', '대통령 령 …'                (단독 '법률'·'령')
+    // 진짜 법령명은 접미가 본문에 붙거나('부가가치세법'·'…시행령'·'…시행규칙') '…에 관한
+    // 법률' 형태다. 합성 접미('시행령' 등)는 lastToken 자체가 길어 이 조건에 안 걸리므로
+    // 정상 법령명은 보존된다. ('같은/해당 법'은 위 GENERIC 필터가 이미 처리.)
+    if (/^(법|법률|령|규칙)$/.test(lastToken) && prevToken && !/(관한|관련|대한|및|등의)$/.test(prevToken)) continue;
     return name;
   }
   return null;
@@ -1175,8 +1183,12 @@ function annotateLawLinks(lawLinks, sources) {
 }
 
 // 레지스트리를 프론트 우측 패널용 배열로 변환(필요한 필드만, 내부 식별자 제외).
+// 우측 '관련 법령' 패널은 '실제 클릭 가능한 원문 링크가 있는 출처'만 보여준다.
+//   - 법령명을 못 뽑아 url이 없는 법령 카드('법제처 조회 확인(법령명 미파악)')는 제외
+//   - 판례·해석례(decision)는 law.go.kr 원문 url이 없으므로(항상 url=null) 자동 제외
+// (decision/url없는 출처는 검증·통계용으로 레지스트리에는 남고, 화면 표시에서만 빠진다.)
 function buildSourcesForClient(sources) {
-  return (Array.isArray(sources) ? sources : []).map((s) => ({
+  return (Array.isArray(sources) ? sources : []).filter((s) => s && s.url).map((s) => ({
     kind: s.kind,
     title: s.title || '',
     label: s.label || '',

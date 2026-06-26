@@ -438,7 +438,7 @@ export default function Home() {
                 {sources.length > 0 && (
                   <div style={s.sourceSection}>
                     <div style={s.sourceTitle}>🔎 실제 조회된 출처 <span style={s.sourceCount}>{sources.length}</span></div>
-                    <div style={s.sourceHint}>AI가 답변 작성에 실제로 조회한 자료입니다(검색 도구 결과 기준).</div>
+                    <div style={s.sourceHint}>AI가 답변 작성에 실제로 조회한 자료 중 원문 링크가 있는 항목입니다.</div>
                     {sources.map((src, i) => {
                       const Inner = (
                         <>
