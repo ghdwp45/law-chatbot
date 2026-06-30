@@ -1,19 +1,20 @@
 import { GoogleGenAI } from '@google/genai';
-import { createClient } from '@supabase/supabase-js';
+import { ntsHybridSearch, tursoHealth } from '../../../lib/turso.js';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
 // RAG(로컬 검색) 전용 진단 엔드포인트. 운영에서 search_nts_taxlaw/search_kifrs_accounting이
-// "서버 오류"로 실패할 때, 어느 의존성(키 미설정 / Gemini / Supabase)이 문제인지 빠르게 가린다.
+// "서버 오류"로 실패할 때, 어느 의존성(키 미설정 / Gemini / Turso)이 문제인지 빠르게 가린다.
 // 비밀값은 절대 노출하지 않고 존재 여부(boolean)와 마스킹된 에러 메시지만 반환한다.
-// 비용·남용 방지: 실제 외부호출(임베딩/RPC)은 ?probe=1 일 때만 수행한다(기본은 키 존재여부만).
+// 비용·남용 방지: 실제 외부호출(임베딩/Turso)은 ?probe=1 일 때만 수행한다(기본은 키 존재여부만).
 const NTS_EMBED_MODEL = 'gemini-embedding-001';
-const NTS_EMBED_DIM = 512;
+// 저장 벡터는 Turso F32_BLOB(768)이다. 쿼리 임베딩도 768로 맞춘다.
+const NTS_EMBED_DIM = 768;
 
 function mask(msg) {
   let s = String(msg || '').slice(0, 300);
-  for (const v of [process.env.GEMINI_API_KEY, process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_URL]) {
+  for (const v of [process.env.GEMINI_API_KEY, process.env.TURSO_AUTH_TOKEN, process.env.TURSO_DATABASE_URL]) {
     if (v) s = s.split(v).join('***');
   }
   return s;
@@ -23,20 +24,20 @@ export async function GET(request) {
   const probe = new URL(request.url).searchParams.get('probe') === '1';
   const env = {
     GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
-    SUPABASE_URL: !!process.env.SUPABASE_URL,
-    SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+    TURSO_DATABASE_URL: !!process.env.TURSO_DATABASE_URL,
+    TURSO_AUTH_TOKEN: !!process.env.TURSO_AUTH_TOKEN,
     HEALTH_TOKEN: !!process.env.HEALTH_TOKEN,  // 값은 노출 안 함, 설정 여부만
   };
-  const result = { ok: false, env, embed: 'skipped', supabase: 'skipped', dims: null };
+  const result = { ok: false, env, embed: 'skipped', turso: 'skipped', counts: null, dims: null };
 
   if (!probe) {
-    result.ok = env.GEMINI_API_KEY && env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY;
+    result.ok = env.GEMINI_API_KEY && env.TURSO_DATABASE_URL && env.TURSO_AUTH_TOKEN;
     result.note = '키 존재여부만 확인함(비용 0). 실제 연결까지 보려면 ?probe=1&token=… 추가.';
     return Response.json(result);
   }
 
   // 비용 드는 실제 호출(probe)은 토큰으로 잠근다 — 아무나 호출해 Gemini 비용이 새는 것 방지.
-  // HEALTH_TOKEN(Vercel 환경변수)과 URL의 token 파라미터가 일치할 때만 실행.
+  // HEALTH_TOKEN(환경변수)과 URL의 token 파라미터가 일치할 때만 실행.
   const token = (new URL(request.url).searchParams.get('token') || '').trim();
   const expected = (process.env.HEALTH_TOKEN || '').trim();  // 값 끝 공백·줄바꿈 실수 방어
   if (!expected || token !== expected) {
@@ -62,19 +63,16 @@ export async function GET(request) {
     result.embed = `error: ${mask(e.message)}`;
   }
 
-  // 2) Supabase RPC 실제 호출(임베딩 성공 시 그 벡터로, 실패 시 더미 벡터로 함수 존재만 확인)
+  // 2) Turso 실제 호출 — 테이블 행 수 + (임베딩 성공 시) 하이브리드 검색 1건.
   try {
-    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    result.counts = await tursoHealth();
     const vec = queryEmbedding || new Array(NTS_EMBED_DIM).fill(0.01);
-    const { data, error } = await supabase.rpc('match_nts_chunks_hybrid', {
-      query_embedding: vec, query_text: '진단', match_count: 1, filter_tlaw: null,
-    });
-    if (error) result.supabase = `error: ${mask(error.message)}`;
-    else result.supabase = `ok (rows=${(data || []).length})`;
+    const rows = await ntsHybridSearch({ queryEmbedding: vec, queryText: '진단', matchCount: 1 });
+    result.turso = `ok (rows=${rows.length})`;
   } catch (e) {
-    result.supabase = `error: ${mask(e.message)}`;
+    result.turso = `error: ${mask(e.message)}`;
   }
 
-  result.ok = result.embed === 'ok' && result.supabase.startsWith('ok');
+  result.ok = result.embed === 'ok' && result.turso.startsWith('ok');
   return Response.json(result);
 }
