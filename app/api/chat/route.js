@@ -76,6 +76,9 @@ const MAX_DECISION_SEARCHES = Number(process.env.MAX_DECISION_SEARCHES || 12);
 // 레이트리밋 가드: 법제처 API 429가 누적되면 재시도 루프를 끊고 현재 근거로 강제 합성.
 const MAX_RATE_LIMIT_HITS = Number(process.env.MAX_RATE_LIMIT_HITS || 5);
 const MAX_TOOL_RESULT_CHARS = 16000;
+// 요청 입력 방어 한도: 대화 메시지 수 / 전체 입력 글자 수 상한(초과 시 400).
+const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || 50);
+const MAX_INPUT_CHARS = Number(process.env.MAX_INPUT_CHARS || 100000);
 const EVIDENCE_BUDGET = 24000;
 const EVIDENCE_PER_CALL = 6000;
 const JUDGE_MIN_REMAINING_MS = 25000;
@@ -1434,7 +1437,38 @@ export async function POST(req) {
     );
   }
 
-  const { messages } = await req.json();
+  // 입력 검증: 신뢰할 수 없는 요청 본문을 그대로 쓰기 전에 형태·크기를 강제한다.
+  // (배열 아님/이상한 role/거대한 payload → 500·비용폭증·문맥오염 방지)
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: '잘못된 요청 형식입니다(JSON 파싱 실패).' }, { status: 400 });
+  }
+  const { messages } = body || {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return Response.json({ error: 'messages는 비어 있지 않은 배열이어야 합니다.' }, { status: 400 });
+  }
+  if (messages.length > MAX_MESSAGES) {
+    return Response.json({ error: '대화가 너무 깁니다. 새 대화로 시작해 주세요.' }, { status: 400 });
+  }
+  let totalChars = 0;
+  for (const m of messages) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) {
+      return Response.json({ error: "각 메시지의 role은 'user' 또는 'assistant'여야 합니다." }, { status: 400 });
+    }
+    if (typeof m.content !== 'string' && !Array.isArray(m.content)) {
+      return Response.json({ error: 'message content 형식이 올바르지 않습니다.' }, { status: 400 });
+    }
+    // 크기 산정은 '추출된 텍스트'가 아니라 '원본 payload'로 한다.
+    // (이미지/base64/임의 객체 블록은 텍스트 추출이 비어도 실제 크기가 매우 클 수 있어,
+    //  텍스트 기준으로만 재면 한도 우회가 가능하다.)
+    const raw = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+    totalChars += (raw ? raw.length : 0);
+  }
+  if (totalChars > MAX_INPUT_CHARS) {
+    return Response.json({ error: '입력이 너무 깁니다. 질문을 줄여 주세요.' }, { status: 400 });
+  }
   const lastUserContent = messages.filter((m) => m.role === 'user').at(-1)?.content || '';
   const lastUserMsg = messageContentToText(lastUserContent);
   console.log('[DEBUG] OC:', LAW_OC ? `set(len=${LAW_OC.length})` : '❌ MISSING');
