@@ -42,19 +42,27 @@ law-chatbot/
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | ✅ | Anthropic Claude API 키 (`sk-ant-...`) |
 | `LAW_OC` | ✅ | 법제처 OPEN API 인증 코드(OC). 없으면 법령 조회가 동작하지 않습니다 |
+| `GEMINI_API_KEY` | ✅ | Google Gemini API 키. 국세청·K-IFRS·판례 RAG 검색의 쿼리 임베딩에 사용됩니다 |
+| `TURSO_DATABASE_URL` | ✅ | Turso(libsql) 데이터베이스 URL. RAG 벡터/전문검색 데이터가 저장된 곳 |
+| `TURSO_AUTH_TOKEN` | ✅ | Turso 인증 토큰(로컬 파일 DB가 아니면 필요) |
 | `ANSWER_MODEL` | | 답변 생성 모델 (기본: `claude-sonnet-4-6`) |
 | `FAST_JUDGE_MODEL` | | 저위험 검증용 모델 (기본: `claude-haiku-4-5`) |
 | `STRICT_JUDGE_MODEL` | | 고위험 검증용 모델 (기본: `claude-sonnet-4-6`) |
+| `HEALTH_TOKEN` | | 진단 API(`/api/health/rag`) 접근 토큰. 설정 시 이 값이 일치해야 진단 정보를 조회할 수 있습니다 |
 | `RATE_LIMIT_MAX` | | IP당 시간창 내 최대 요청 수 (기본: 10) |
 | `RATE_LIMIT_WINDOW_MS` | | 요청 제한 시간창(ms) (기본: 60000) |
+| `MAX_MESSAGES` | | 한 요청의 최대 대화 메시지 수 (기본: 50) |
+| `MAX_INPUT_CHARS` | | 한 요청의 최대 입력 글자 수 (기본: 100000) |
 
 > `LAW_OC`는 법제처 OPEN API([open.law.go.kr](https://open.law.go.kr))에서 신청해 발급받는 사용자 식별 코드입니다.
+>
+> `GEMINI_API_KEY`·`TURSO_*`는 국세청 질의회신·K-IFRS·판례 검색(로컬 RAG)에 필요합니다. 이 값들이 없으면 법령 조문 조회는 되지만 RAG 검색은 실패합니다. Turso 데이터베이스 스키마는 `turso/001_schema.reference.sql`(재구성 참조본)을 참고하세요.
 
 ## 로컬 실행
 
 ```bash
 npm install
-# 루트에 .env.local 파일을 만들고 ANTHROPIC_API_KEY, LAW_OC 를 넣은 뒤
+# 루트에 .env.local 파일을 만들고 ANTHROPIC_API_KEY, LAW_OC, GEMINI_API_KEY, TURSO_DATABASE_URL, TURSO_AUTH_TOKEN 를 넣은 뒤
 npm run dev
 ```
 
@@ -64,7 +72,7 @@ npm run dev
 
 1. 이 저장소를 GitHub에 올린다 (이미 `github.com/ghdwp45/law-chatbot` 에 연결됨).
 2. [vercel.com](https://vercel.com)에 GitHub 계정으로 로그인 → `Add New Project` → `law-chatbot` 선택.
-3. **Environment Variables**에 `ANTHROPIC_API_KEY`와 `LAW_OC`를 등록한다. (필요하면 위 표의 다른 변수도 추가)
+3. **Environment Variables**에 `ANTHROPIC_API_KEY`, `LAW_OC`, `GEMINI_API_KEY`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`을 등록한다. (필요하면 위 표의 다른 변수도 추가)
 4. `Deploy` 클릭 → 완료되면 `https://law-chatbot.vercel.app` 같은 URL이 생성된다.
 5. 직원·동료에게는 이 URL만 공유하면 된다. **API 키는 Vercel 서버에만 저장되어 사용자에게 노출되지 않는다.**
 

@@ -56,6 +56,7 @@ export default function Home() {
   const textareaRef = useRef(null);
   const linkRefs = useRef({});
   const readerRef = useRef(null);
+  const abortRef = useRef(null);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -66,7 +67,13 @@ export default function Home() {
   const parseResponse = (text) => {
     const explainMatch = text.match(/===해설===([\s\S]*?)===해설끝===/);
     const lawMatch = text.match(/===관련법령===([\s\S]*?)===관련법령끝===/);
-    const explainText = explainMatch ? explainMatch[1].trim() : text;
+    // ===해설=== 마커 앞에 붙은 검증 경고/주의 배너를 살려 본문 앞에 다시 붙인다.
+    // (서버가 근거 부실 시 배너를 마커 "바깥"에 prepend하므로, 마커 안쪽만 추출하면 경고가 사라진다.)
+    const bannerPrefix = explainMatch && explainMatch.index > 0
+      ? text.slice(0, explainMatch.index).split("\n").map((l) => l.replace(/^>\s?/, "")).join("\n").trim()
+      : "";
+    const explainBody = explainMatch ? explainMatch[1].trim() : text;
+    const explainText = bannerPrefix ? `${bannerPrefix}\n\n${explainBody}` : explainBody;
     const links = [];
     const seen = new Set();
     const push = (lawName, articleNo, desc) => {
@@ -119,14 +126,18 @@ export default function Home() {
       .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
       .replace(/(제\d+조(?:의\d+)?(?:\s*제\d+항)?(?:\s*제\d+호)?)/g,
         `<span class="law-ref" onclick="window._clickArticle('$1')">$1</span>`)
-      .replace(/\[([^\]]+?)(제\d+조(?:의\d+)?)\]/g,
-        `<span class="law-tag" onclick="window._clickArticle('$2')">$1 $2</span>`)
       .replace(/\n/g, "<br/>");
   };
 
   const stopGeneration = () => {
+    // 서버의 AI 호출까지 확실히 중단하려면 fetch 자체를 abort해야 한다.
+    // (reader.cancel()만으로는 브라우저 스트림만 끊길 뿐 서버 작업이 이어질 수 있다.)
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
     if (readerRef.current) {
-      readerRef.current.cancel();
+      try { readerRef.current.cancel(); } catch {}
       readerRef.current = null;
     }
     setLoading(false);
@@ -151,11 +162,14 @@ export default function Home() {
     // 빈 assistant 메시지 미리 추가
     setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: newMessages.map(({ role, content }) => ({ role, content })) }),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
@@ -251,6 +265,8 @@ export default function Home() {
       // 스트림 종료 후 남은 완결 이벤트 처리
       if (buffer.trim()) handleEvent(buffer);
     } catch (e) {
+      // 사용자가 중단 버튼을 눌러 abort한 경우: 에러로 표시하지 않고 지금까지 렌더된 내용을 유지.
+      if (e.name === "AbortError") return;
       const isOverloaded = e.message === "OVERLOADED" || e.message?.toLowerCase().includes("overload");
       const errMsg = isOverloaded
         ? "⚠️ 서버 과부하 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
@@ -262,9 +278,14 @@ export default function Home() {
         return updated;
       });
     } finally {
-      readerRef.current = null;
-      setLoading(false);
-      setRevising(false);
+      // 이 요청이 여전히 활성 요청일 때만 정리한다.
+      // (중단 직후 새 요청이 시작되면, 옛 요청의 정리가 새 요청의 컨트롤러·상태를 덮어쓰지 않도록.)
+      if (abortRef.current === controller) {
+        readerRef.current = null;
+        abortRef.current = null;
+        setLoading(false);
+        setRevising(false);
+      }
     }
   };
 
@@ -514,20 +535,6 @@ export default function Home() {
         @keyframes highlight-pulse { 0%,100%{box-shadow:0 0 0 3px rgba(192,57,43,0.3)} 50%{box-shadow:0 0 0 6px rgba(192,57,43,0.1)} }
         .law-ref { color:#c0392b; font-weight:700; cursor:pointer; border-bottom:1.5px dashed #c0392b; padding:0 2px; }
         .law-ref:hover { background:#fde8e8; border-radius:3px; }
-        .law-tag {
-          display: inline-block;
-          background: #1a1208;
-          color: #f5f0e8;
-          font-size: 10px;
-          font-weight: 600;
-          padding: 2px 7px;
-          border-radius: 10px;
-          margin-left: 4px;
-          cursor: pointer;
-          vertical-align: middle;
-          transition: background 0.15s;
-        }
-        .law-tag:hover { background: #c0392b; }
       `}</style>
     </div>
   );

@@ -21,30 +21,40 @@ function mask(msg) {
 }
 
 export async function GET(request) {
-  const probe = new URL(request.url).searchParams.get('probe') === '1';
+  const url = new URL(request.url);
+  const probe = url.searchParams.get('probe') === '1';
+
+  const token = (url.searchParams.get('token') || '').trim();
+  const expected = (process.env.HEALTH_TOKEN || '').trim();  // 값 끝 공백·줄바꿈 실수 방어
+  const authorized = !!expected && token === expected;
+
   const env = {
     GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
     TURSO_DATABASE_URL: !!process.env.TURSO_DATABASE_URL,
     TURSO_AUTH_TOKEN: !!process.env.TURSO_AUTH_TOKEN,
     HEALTH_TOKEN: !!process.env.HEALTH_TOKEN,  // 값은 노출 안 함, 설정 여부만
   };
+  const configured = env.GEMINI_API_KEY && env.TURSO_DATABASE_URL && env.TURSO_AUTH_TOKEN;
+
+  // 미인증: 어떤 키가 설정됐는지(per-key 힌트)는 숨기고, 전체 구성 여부(ok) 한 개만 알려준다.
+  // 이렇게 하면 기본 헬스체크는 토큰 없이도 되면서, per-key 설정 노출은 막힌다.
+  // 비용 드는 실제 연결검사(probe)는 유효한 토큰이 있을 때만 허용한다.
+  if (!authorized) {
+    if (probe) {
+      return Response.json(
+        { ok: false, error: 'probe는 유효한 token이 필요합니다(?probe=1&token=…).' },
+        { status: 401 }
+      );
+    }
+    return Response.json({ ok: configured, note: '기본 상태만 표시(전체 구성 완료 여부). 상세 진단은 ?token=… 필요.' });
+  }
+
   const result = { ok: false, env, embed: 'skipped', turso: 'skipped', counts: null, dims: null };
 
   if (!probe) {
-    result.ok = env.GEMINI_API_KEY && env.TURSO_DATABASE_URL && env.TURSO_AUTH_TOKEN;
-    result.note = '키 존재여부만 확인함(비용 0). 실제 연결까지 보려면 ?probe=1&token=… 추가.';
+    result.ok = configured;
+    result.note = '키 존재여부만 확인함(비용 0). 실제 연결까지 보려면 ?probe=1 추가.';
     return Response.json(result);
-  }
-
-  // 비용 드는 실제 호출(probe)은 토큰으로 잠근다 — 아무나 호출해 Gemini 비용이 새는 것 방지.
-  // HEALTH_TOKEN(환경변수)과 URL의 token 파라미터가 일치할 때만 실행.
-  const token = (new URL(request.url).searchParams.get('token') || '').trim();
-  const expected = (process.env.HEALTH_TOKEN || '').trim();  // 값 끝 공백·줄바꿈 실수 방어
-  if (!expected || token !== expected) {
-    return Response.json(
-      { ok: false, env, error: 'probe는 유효한 token이 필요합니다(?probe=1&token=…). 키 존재여부는 token 없이 확인 가능.' },
-      { status: 401 }
-    );
   }
 
   // 1) Gemini 임베딩 실제 호출
