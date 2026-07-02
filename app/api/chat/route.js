@@ -331,6 +331,9 @@ async function runNtsSearch({ query, tlaw, top_k, source }) {
     let hybridRows = [];
     let topSim = null;
     let hadHybridData = false;
+    // 출처 필터('mof'|'nts'|null). 하이브리드 검색과 mofDeliberate 판정에서 함께 쓰므로
+    // if 블록 밖(함수 스코프)에 두어 결과 매핑 시점(sources.push)에서도 참조 가능하게 한다.
+    const filterSource = (source === 'mof' || source === 'nts') ? source : null;
     if (!isPureDocNo) {
       const emb = await getGenaiClient().models.embedContent({
         model: NTS_EMBED_MODEL,
@@ -338,7 +341,6 @@ async function runNtsSearch({ query, tlaw, top_k, source }) {
         config: { taskType: 'RETRIEVAL_QUERY', outputDimensionality: NTS_EMBED_DIM, abortSignal: signal },
       });
       const queryEmbedding = emb.embeddings[0].values;
-      const filterSource = (source === 'mof' || source === 'nts') ? source : null;
       let data;
       try {
         data = await ntsHybridSearch({
@@ -405,6 +407,9 @@ async function runNtsSearch({ query, tlaw, top_k, source }) {
         sources.push({
           kind: 'nts',
           mof: isMof,                       // 기재부 세법해석 여부(🏛️ 태그 검증·아이콘 구분용)
+          // 의도적 조회 여부: source='mof'로 기재부를 콕 집어 검색했을 때만 true.
+          // 넓은(무필터) 검색에 유사도로 우연히 섞여 들어온 기재부 문서는 '검토했다'로 치지 않는다.
+          mofDeliberate: isMof && filterSource === 'mof',
           id: `nts:${r.doc_id}`,
           title: r.title || '(제목 없음)',
           label: source,
@@ -618,6 +623,8 @@ async function runGetNtsDocument({ doc_id }) {
     const fullText = data.map((r) => r.content).join('\n');
     const sources = [{
       kind: 'nts', mof: isMof, id: `nts:${head.doc_id}`, title: head.title || '(제목 없음)',
+      // 전문 조회는 그 문서를 콕 집어 열어본 것이므로, 기재부 문서면 '의도적 조회'로 인정한다.
+      mofDeliberate: isMof,
       label: source, icon: isMof ? '🏛️' : '🗂️', url,
       meta: `문서ID ${head.doc_id} · ${head.tlaw || '세목미상'} · ${head.prod_date || '일자미상'} · 전문(${data.length}/${total}청크)`,
       refIds: [head.qstn_no, head.reply_no].filter(Boolean).map(normalizeId),
@@ -1069,7 +1076,9 @@ function computeCoverage(stats) {
   const admin = mk(calls.filter((c) => c.name === 'search_nts_taxlaw'), '기재부/국세청 해석');
   // 과세관청 버킷 안에서 기재부/국세청을 따로 본다(표시·보충 판단용). 실제 결과(stats.sources)로 판정한다.
   const sources = Array.isArray(stats?.sources) ? stats.sources : [];
-  admin.mofFound = sources.some((s) => s.kind === 'nts' && s.mof);
+  // 기재부는 '의도적 조회'(source=mof 검색 또는 전문 조회)일 때만 '조회됨'으로 본다.
+  // 넓은 검색에 우연히 섞인 기재부 문서 한 건으로 버킷이 잘못 켜지던 오탐을 막는다.
+  admin.mofFound = sources.some((s) => s.kind === 'nts' && s.mof && s.mofDeliberate);
   admin.ntsFound = sources.some((s) => s.kind === 'nts' && !s.mof);
   return {
     law: mk(calls.filter((c) => c.name === 'search_law' || c.name === 'get_law_text'), '법령 원문'),
@@ -1602,10 +1611,15 @@ export async function POST(req) {
             // 이미 등록된 출처면, 더 완전한 조회(발췌→전문)로 올려준다.
             // 예: search_nts_taxlaw가 발췌로 먼저 등록 → get_nts_document로 전문 조회 시 패널을 전문으로 갱신.
             const existing = stats.sources.find((s) => s.id === sObj.id);
-            if (existing && existing.partial && sObj.partial === false) {
-              existing.partial = false;
-              if (sObj.meta) existing.meta = sObj.meta;
-              if (sObj.url) existing.url = sObj.url;
+            if (existing) {
+              // 나중에 온 조회가 '의도적'(전문조회 또는 source=mof)이면 기존 항목도 의도적으로 승격한다.
+              // (발췌로 먼저 등록된 기재부 문서를 전문 조회해도 mofDeliberate가 유실되지 않게. partial 여부와 무관.)
+              if (sObj.mofDeliberate && !existing.mofDeliberate) existing.mofDeliberate = true;
+              if (existing.partial && sObj.partial === false) {
+                existing.partial = false;
+                if (sObj.meta) existing.meta = sObj.meta;
+                if (sObj.url) existing.url = sObj.url;
+              }
             }
             continue;
           }
