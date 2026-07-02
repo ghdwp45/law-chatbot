@@ -1,6 +1,21 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 
+// 화면 폭이 좁으면(모바일) true를 돌려주는 훅.
+// SSR(서버 렌더) 때는 window가 없어 초기값 false로 두고, 브라우저에서 마운트된 뒤
+// 실제 폭을 반영한다. 창 크기가 바뀌면 change 이벤트로 자동 갱신한다.
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${breakpoint}px)`);
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, [breakpoint]);
+  return isMobile;
+}
+
 const EXAMPLES = [
   { label: "📋 원문 조회", q: "근로기준법 제55조 제2항 원문 찾아줘" },
   { label: "💡 쉬운 해설", q: "감사인 독립성이 뭔지 쉽게 설명해줘" },
@@ -40,6 +55,107 @@ const kifrsStdNo = (link) => {
   return m ? m[1] : "";
 };
 
+// 오른쪽 '관련 법령' 패널의 본문(검토 출처·조회 출처·관련법령 링크·직접검색 또는 빈 상태).
+// 데스크톱 오른쪽 패널과 모바일 하단 시트가 이 컴포넌트를 함께 써서, 한 곳만 고치면 양쪽에 반영된다.
+function LawPanel({ lawLinks, sources, coverage, activeArticle, linkRefs }) {
+  if (lawLinks.length === 0 && sources.length === 0 && !coverage) {
+    return (
+      <div style={s.emptyLaw}>
+        <div style={s.emptyIcon}>⚖️</div>
+        <p style={s.emptyText}>질문하면 관련 법령 링크가<br/>여기에 표시됩니다</p>
+        <p style={s.emptySubText}>클릭하면 국가법령정보센터에서<br/>원문을 바로 확인할 수 있습니다</p>
+      </div>
+    );
+  }
+  return (
+    <div>
+      {coverage && coverage.length > 0 && (
+        <div style={s.sourceSection}>
+          <div style={s.sourceTitle}>🔎 검토한 출처</div>
+          <div style={s.sourceHint}>이 해석 쟁점에서 AI가 출처 종류별로 실제 조회했는지 표시합니다(서버 기록 기준).</div>
+          {coverage.map((b, i) => {
+            const m = {
+              found:   { icon: "✅", text: "조회됨", color: "#1a7f37" },
+              empty:   { icon: "➖", text: "조회했으나 0건", color: "#9a6700" },
+              error:   { icon: "⚠️", text: "조회 오류", color: "#cf222e" },
+              skipped: { icon: "⬜", text: "미조회", color: "#8c959f" },
+            }[b.status] || { icon: "⬜", text: b.status, color: "#8c959f" };
+            return (
+              <div key={i} style={s.coverageItem}>
+                <span>{m.icon} {b.label}</span>
+                <span style={{ color: m.color, fontWeight: 600 }}>{m.text}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {sources.length > 0 && (
+        <div style={s.sourceSection}>
+          <div style={s.sourceTitle}>🔎 실제 조회된 출처 <span style={s.sourceCount}>{sources.length}</span></div>
+          <div style={s.sourceHint}>AI가 답변 작성에 실제로 조회한 자료 중 원문 링크가 있는 항목입니다.</div>
+          {sources.map((src, i) => {
+            const Inner = (
+              <>
+                <div style={s.sourceItemTop}>
+                  <span style={s.sourceIcon}>{src.icon}</span>
+                  <span style={s.sourceLabel}>{src.label}</span>
+                  {src.partial && <span style={s.sourcePartial}>발췌</span>}
+                </div>
+                <div style={s.sourceItemTitle}>{src.title}</div>
+                {src.meta && <div style={s.sourceMeta}>{src.meta}</div>}
+                {src.url && <div style={s.sourceUrl}>🔗 원문 보기 →</div>}
+              </>
+            );
+            return src.url ? (
+              <a key={i} href={src.url} target="_blank" rel="noopener noreferrer" style={s.sourceItem}>{Inner}</a>
+            ) : (
+              <div key={i} style={s.sourceItem}>{Inner}</div>
+            );
+          })}
+        </div>
+      )}
+      {lawLinks.length > 0 && (
+      <>
+      <div style={s.lawNote}>💡 왼쪽 답변의 <strong>조문번호</strong>를 클릭하면 해당 법령이 하이라이트됩니다</div>
+      {lawLinks.map((link, i) => {
+        const key = link.articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
+        const isActive = activeArticle && link.articleNo.includes(activeArticle.match(/제\d+조(?:의\d+)?/)?.[0] || activeArticle);
+        // K-IFRS 회계기준이면 KASB 열람서비스로, 법령이면 국가법령정보센터로 연결.
+        const std = kifrsStdNo(link);
+        const isKifrs = std !== null;
+        const href = isKifrs ? getKasbUrl(std) : getLawSearchUrl(link.lawName);
+        const urlLabel = isKifrs ? "📘 KASB 회계기준 열람 →" : "🔗 law.go.kr에서 원문 보기 →";
+        return (
+          <a key={i}
+            ref={el => { if (key) linkRefs.current[key] = el; }}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{...s.lawLink, ...(isActive ? s.lawLinkActive : {})}}
+          >
+            {isActive && <div style={s.highlightBadge}>👆 현재 선택된 조문</div>}
+            <div style={s.lawLinkTop}>
+              <span style={s.lawLinkName}>{link.lawName}</span>
+              <span style={{...s.lawLinkArticle, ...(isActive ? s.lawLinkArticleActive : {})}}>{link.articleNo}</span>
+              {link.verified && <span style={s.verifiedBadge} title="검색 도구로 실제 조회 확인됨">✓ 조회됨</span>}
+            </div>
+            {link.desc && <div style={s.lawLinkDesc}>{link.desc}</div>}
+            <div style={s.lawLinkUrl}>{urlLabel}</div>
+          </a>
+        );
+      })}
+      </>
+      )}
+      <div style={s.lawDirectSearch}>
+        <div style={s.lawDirectTitle}>📌 직접 검색</div>
+        <a href="https://www.law.go.kr" target="_blank" rel="noopener noreferrer" style={s.lawDirectLink}>
+          국가법령정보센터 바로가기 →
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -52,6 +168,9 @@ export default function Home() {
   // 검토한 출처 4버킷(법령/과세관청해석/조세심판원/판례·해석례)의 조회 결과. 서버 기록 기반.
   const [coverage, setCoverage] = useState(null);
   const [activeArticle, setActiveArticle] = useState(null);
+  const isMobile = useIsMobile();
+  // 모바일에서 '관련 법령'을 여는 하단 시트 열림 여부. 데스크톱에선 항상 오른쪽 패널로 보이므로 미사용.
+  const [sheetOpen, setSheetOpen] = useState(false);
   const chatRef = useRef(null);
   const textareaRef = useRef(null);
   const linkRefs = useRef({});
@@ -102,14 +221,24 @@ export default function Home() {
   const handleArticleClick = (articleNo) => {
     setActiveArticle(articleNo);
     const key = articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
-    if (key && linkRefs.current[key]) {
-      linkRefs.current[key].scrollIntoView({ behavior: "smooth", block: "center" });
+    // 모바일에선 관련법령이 하단 시트 안에 있으므로, 먼저 시트를 열고
+    // 시트가 렌더된 다음 프레임에 해당 카드로 스크롤한다(바로 스크롤하면 ref가 아직 없다).
+    const scrollToCard = () => {
+      if (key && linkRefs.current[key]) {
+        linkRefs.current[key].scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    };
+    if (isMobile) {
+      setSheetOpen(true);
+      requestAnimationFrame(() => requestAnimationFrame(scrollToCard));
+    } else {
+      scrollToCard();
     }
   };
 
   useEffect(() => {
     window._clickArticle = handleArticleClick;
-  }, [lawLinks]);
+  }, [lawLinks, isMobile]);
 
   // 사용자 입력·모델 출력에 섞인 HTML이 그대로 실행되는 것(XSS)을 막기 위해
   // 먼저 위험 문자를 무력화한 뒤에만 우리가 의도한 태그(굵게·조문링크)를 입힌다.
@@ -154,6 +283,7 @@ export default function Home() {
     setLawLinks([]);   // 새 질문 시작 시 이전 답변의 관련 법령을 비운다
     setSources([]);    // 이전 답변의 조회 출처도 비운다
     setCoverage(null); // 이전 답변의 검토 출처 표시도 비운다
+    setSheetOpen(false); // 새 질문 시작 시 열려 있던 법령 시트를 닫는다(내용이 비워지므로)
 
     const newMessages = [...messages, { role: "user", content: userText }];
     setMessages(newMessages);
@@ -306,17 +436,19 @@ export default function Home() {
       setSources([]);
       setCoverage(null);
       setActiveArticle(null);
+      setSheetOpen(false);
     }
   };
 
   return (
     <div style={s.root}>
-      <header style={s.header}>
+      <header style={isMobile ? {...s.header, ...s.headerM} : s.header}>
         <div style={s.headerLeft}>
           <div style={s.seal}>법</div>
           <div>
             <div style={s.headerTitle}>법령 AI 어시스턴트</div>
-            <div style={s.headerSub}>국가법령정보 기반 · law.go.kr 연동</div>
+            {/* 좁은 화면에선 공간 확보를 위해 부제를 숨긴다 */}
+            {!isMobile && <div style={s.headerSub}>국가법령정보 기반 · law.go.kr 연동</div>}
           </div>
         </div>
         <div style={s.headerRight}>
@@ -329,7 +461,7 @@ export default function Home() {
       </header>
 
       <div style={s.body}>
-        <div style={s.leftPane}>
+        <div style={isMobile ? {...s.leftPane, ...s.leftPaneM} : s.leftPane}>
           <div style={s.chatArea} ref={chatRef}>
             {messages.length === 0 && (
               <div style={s.welcome}>
@@ -395,6 +527,14 @@ export default function Home() {
             )}
           </div>
 
+          {/* 모바일: 조회 결과가 있으면 입력창 위에 '관련 법령' 알약 버튼 → 탭 시 하단 시트 */}
+          {isMobile && (lawLinks.length > 0 || sources.length > 0 || (coverage && coverage.length > 0)) && (
+            <button style={s.lawPill} onClick={() => setSheetOpen(true)}>
+              <span>📜 관련 법령{lawLinks.length > 0 ? ` ${lawLinks.length}개` : ""}</span>
+              <span style={s.lawPillArrow}>▲</span>
+            </button>
+          )}
+
           <div style={s.inputArea}>
             <div style={s.inputRow}>
               <textarea
@@ -420,110 +560,38 @@ export default function Home() {
           </div>
         </div>
 
-        <div style={s.rightPane}>
-          <div style={s.rightHeader}>
-            <span style={s.rightHeaderIcon}>📜</span>
-            <span style={s.rightHeaderTitle}>관련 법령</span>
-            {lawLinks.length > 0 && <span style={s.rightHeaderBadge}>{lawLinks.length}개</span>}
+        {/* 데스크톱: 오른쪽 고정 패널. 모바일에선 렌더하지 않고 아래 하단 시트로 대체 */}
+        {!isMobile && (
+          <div style={s.rightPane}>
+            <div style={s.rightHeader}>
+              <span style={s.rightHeaderIcon}>📜</span>
+              <span style={s.rightHeaderTitle}>관련 법령</span>
+              {lawLinks.length > 0 && <span style={s.rightHeaderBadge}>{lawLinks.length}개</span>}
+            </div>
+            <div style={s.lawContent}>
+              <LawPanel lawLinks={lawLinks} sources={sources} coverage={coverage} activeArticle={activeArticle} linkRefs={linkRefs} />
+            </div>
           </div>
+        )}
+      </div>
 
-          <div style={s.lawContent}>
-            {(lawLinks.length === 0 && sources.length === 0 && !coverage) ? (
-              <div style={s.emptyLaw}>
-                <div style={s.emptyIcon}>⚖️</div>
-                <p style={s.emptyText}>질문하면 관련 법령 링크가<br/>여기에 표시됩니다</p>
-                <p style={s.emptySubText}>클릭하면 국가법령정보센터에서<br/>원문을 바로 확인할 수 있습니다</p>
-              </div>
-            ) : (
-              <div>
-                {coverage && coverage.length > 0 && (
-                  <div style={s.sourceSection}>
-                    <div style={s.sourceTitle}>🔎 검토한 출처</div>
-                    <div style={s.sourceHint}>이 해석 쟁점에서 AI가 출처 종류별로 실제 조회했는지 표시합니다(서버 기록 기준).</div>
-                    {coverage.map((b, i) => {
-                      const m = {
-                        found:   { icon: "✅", text: "조회됨", color: "#1a7f37" },
-                        empty:   { icon: "➖", text: "조회했으나 0건", color: "#9a6700" },
-                        error:   { icon: "⚠️", text: "조회 오류", color: "#cf222e" },
-                        skipped: { icon: "⬜", text: "미조회", color: "#8c959f" },
-                      }[b.status] || { icon: "⬜", text: b.status, color: "#8c959f" };
-                      return (
-                        <div key={i} style={s.coverageItem}>
-                          <span>{m.icon} {b.label}</span>
-                          <span style={{ color: m.color, fontWeight: 600 }}>{m.text}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                {sources.length > 0 && (
-                  <div style={s.sourceSection}>
-                    <div style={s.sourceTitle}>🔎 실제 조회된 출처 <span style={s.sourceCount}>{sources.length}</span></div>
-                    <div style={s.sourceHint}>AI가 답변 작성에 실제로 조회한 자료 중 원문 링크가 있는 항목입니다.</div>
-                    {sources.map((src, i) => {
-                      const Inner = (
-                        <>
-                          <div style={s.sourceItemTop}>
-                            <span style={s.sourceIcon}>{src.icon}</span>
-                            <span style={s.sourceLabel}>{src.label}</span>
-                            {src.partial && <span style={s.sourcePartial}>발췌</span>}
-                          </div>
-                          <div style={s.sourceItemTitle}>{src.title}</div>
-                          {src.meta && <div style={s.sourceMeta}>{src.meta}</div>}
-                          {src.url && <div style={s.sourceUrl}>🔗 원문 보기 →</div>}
-                        </>
-                      );
-                      return src.url ? (
-                        <a key={i} href={src.url} target="_blank" rel="noopener noreferrer" style={s.sourceItem}>{Inner}</a>
-                      ) : (
-                        <div key={i} style={s.sourceItem}>{Inner}</div>
-                      );
-                    })}
-                  </div>
-                )}
-                {lawLinks.length > 0 && (
-                <>
-                <div style={s.lawNote}>💡 왼쪽 답변의 <strong>조문번호</strong>를 클릭하면 해당 법령이 하이라이트됩니다</div>
-                {lawLinks.map((link, i) => {
-                  const key = link.articleNo.match(/제\d+조(?:의\d+)?/)?.[0];
-                  const isActive = activeArticle && link.articleNo.includes(activeArticle.match(/제\d+조(?:의\d+)?/)?.[0] || activeArticle);
-                  // K-IFRS 회계기준이면 KASB 열람서비스로, 법령이면 국가법령정보센터로 연결.
-                  const std = kifrsStdNo(link);
-                  const isKifrs = std !== null;
-                  const href = isKifrs ? getKasbUrl(std) : getLawSearchUrl(link.lawName);
-                  const urlLabel = isKifrs ? "📘 KASB 회계기준 열람 →" : "🔗 law.go.kr에서 원문 보기 →";
-                  return (
-                    <a key={i}
-                      ref={el => { if (key) linkRefs.current[key] = el; }}
-                      href={href}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{...s.lawLink, ...(isActive ? s.lawLinkActive : {})}}
-                    >
-                      {isActive && <div style={s.highlightBadge}>👆 현재 선택된 조문</div>}
-                      <div style={s.lawLinkTop}>
-                        <span style={s.lawLinkName}>{link.lawName}</span>
-                        <span style={{...s.lawLinkArticle, ...(isActive ? s.lawLinkArticleActive : {})}}>{link.articleNo}</span>
-                        {link.verified && <span style={s.verifiedBadge} title="검색 도구로 실제 조회 확인됨">✓ 조회됨</span>}
-                      </div>
-                      {link.desc && <div style={s.lawLinkDesc}>{link.desc}</div>}
-                      <div style={s.lawLinkUrl}>{urlLabel}</div>
-                    </a>
-                  );
-                })}
-                </>
-                )}
-                <div style={s.lawDirectSearch}>
-                  <div style={s.lawDirectTitle}>📌 직접 검색</div>
-                  <a href="https://www.law.go.kr" target="_blank" rel="noopener noreferrer" style={s.lawDirectLink}>
-                    국가법령정보센터 바로가기 →
-                  </a>
-                </div>
-              </div>
-            )}
+      {/* 모바일 하단 시트: '관련 법령'을 아래에서 끌어올려 보여준다. 백드롭·✕·핸들로 닫힘 */}
+      {isMobile && sheetOpen && (
+        <div style={s.sheetBackdrop} onClick={() => setSheetOpen(false)}>
+          <div style={s.sheet} onClick={(e) => e.stopPropagation()}>
+            <div style={s.sheetHandle} />
+            <div style={s.sheetHeader}>
+              <span style={s.rightHeaderIcon}>📜</span>
+              <span style={s.rightHeaderTitle}>관련 법령</span>
+              {lawLinks.length > 0 && <span style={s.rightHeaderBadge}>{lawLinks.length}개</span>}
+              <button style={s.sheetClose} onClick={() => setSheetOpen(false)} aria-label="닫기">✕</button>
+            </div>
+            <div style={s.sheetBody}>
+              <LawPanel lawLinks={lawLinks} sources={sources} coverage={coverage} activeArticle={activeArticle} linkRefs={linkRefs} />
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@700&family=Noto+Sans+KR:wght@300;400;500&display=swap');
@@ -533,6 +601,7 @@ export default function Home() {
         ::-webkit-scrollbar-thumb { background: #d4c9b0; border-radius: 2px; }
         @keyframes blink { 0%,60%,100%{transform:translateY(0);opacity:.4} 30%{transform:translateY(-5px);opacity:1} }
         @keyframes highlight-pulse { 0%,100%{box-shadow:0 0 0 3px rgba(192,57,43,0.3)} 50%{box-shadow:0 0 0 6px rgba(192,57,43,0.1)} }
+        @keyframes sheet-up { from{transform:translateY(100%)} to{transform:translateY(0)} }
         .law-ref { color:#c0392b; font-weight:700; cursor:pointer; border-bottom:1.5px dashed #c0392b; padding:0 2px; }
         .law-ref:hover { background:#fde8e8; border-radius:3px; }
       `}</style>
@@ -541,8 +610,10 @@ export default function Home() {
 }
 
 const s = {
-  root:{display:"flex",flexDirection:"column",height:"100vh",background:"#f5f0e8",fontFamily:"'Noto Sans KR',sans-serif"},
+  // height는 100dvh(동적 뷰포트 높이): 모바일 주소창/키보드가 오르내려도 화면에 딱 맞는다.
+  root:{display:"flex",flexDirection:"column",height:"100dvh",background:"#f5f0e8",fontFamily:"'Noto Sans KR',sans-serif"},
   header:{background:"#1a1208",color:"#f5f0e8",padding:"0 24px",height:52,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,borderBottom:"3px solid #b8922a"},
+  headerM:{padding:"0 14px"},   // 모바일: 좌우 여백 축소
   headerLeft:{display:"flex",alignItems:"center",gap:12},
   headerRight:{display:"flex",alignItems:"center",gap:14},
   seal:{width:34,height:34,background:"#c0392b",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Serif KR',serif",fontSize:14,fontWeight:700,color:"white"},
@@ -554,6 +625,17 @@ const s = {
   statusText:{fontSize:11,color:"#aaa"},
   body:{display:"flex",flex:1,overflow:"hidden"},
   leftPane:{display:"flex",flexDirection:"column",flex:"0 0 50%",borderRight:"1px solid #d4c9b0",overflow:"hidden"},
+  leftPaneM:{flex:"1 1 100%",borderRight:"none"},   // 모바일: 채팅이 화면 전체폭
+  // 모바일 '관련 법령' 알약 버튼(입력창 위)
+  lawPill:{display:"flex",alignItems:"center",justifyContent:"center",gap:8,margin:"0 14px 8px",padding:"9px 14px",background:"#1a1208",color:"#f5f0e8",border:"1px solid #b8922a",borderRadius:20,fontSize:13,fontWeight:500,cursor:"pointer",fontFamily:"'Noto Sans KR',sans-serif",flexShrink:0},
+  lawPillArrow:{fontSize:10,color:"#b8922a"},
+  // 하단 시트: 반투명 백드롭 + 아래에서 올라오는 패널
+  sheetBackdrop:{position:"fixed",inset:0,background:"rgba(26,18,8,0.45)",display:"flex",flexDirection:"column",justifyContent:"flex-end",zIndex:100},
+  sheet:{background:"#fdfaf4",borderTopLeftRadius:16,borderTopRightRadius:16,maxHeight:"85dvh",display:"flex",flexDirection:"column",boxShadow:"0 -6px 24px rgba(0,0,0,0.25)",animation:"sheet-up 0.25s ease-out"},
+  sheetHandle:{width:40,height:4,background:"#d4c9b0",borderRadius:2,margin:"10px auto 6px",flexShrink:0},
+  sheetHeader:{display:"flex",alignItems:"center",gap:8,padding:"6px 16px 12px",borderBottom:"1px solid #d4c9b0",flexShrink:0},
+  sheetClose:{marginLeft:"auto",background:"transparent",border:"none",color:"#7a6e60",fontSize:16,cursor:"pointer",padding:"2px 6px",lineHeight:1},
+  sheetBody:{overflowY:"auto",padding:"16px",WebkitOverflowScrolling:"touch"},
   chatArea:{flex:1,overflowY:"auto",padding:"20px 16px",display:"flex",flexDirection:"column",gap:14},
   welcome:{textAlign:"center",padding:"28px 16px"},
   welcomeIcon:{fontSize:36,marginBottom:10},
