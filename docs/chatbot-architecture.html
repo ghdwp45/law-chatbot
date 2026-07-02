@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>law-chatbot 데이터 구조 &amp; 흐름</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#2a2f3a; --txt:#e6e8ec; --muted:#9aa3b2; --accent:#5b9dff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font-family:"Segoe UI","Malgun Gothic",system-ui,sans-serif; line-height:1.6; }
+  header { padding:32px 24px 16px; border-bottom:1px solid var(--line);
+           background:linear-gradient(180deg,#181c24,#0f1115); }
+  header h1 { margin:0 0 6px; font-size:24px; }
+  header p { margin:0; color:var(--muted); font-size:14px; }
+  main { max-width:1180px; margin:0 auto; padding:24px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:14px;
+            padding:20px 22px; margin:22px 0; }
+  section h2 { margin:0 0 4px; font-size:18px; }
+  section .sub { color:var(--muted); font-size:13px; margin:0 0 16px; }
+  .mermaid { background:#0b0d11; border-radius:10px; padding:18px; overflow:auto; }
+  .legend { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:14px; font-size:13px; color:var(--muted); }
+  .legend span b { color:var(--txt); }
+  .note { font-size:13px; color:var(--muted); background:#12151c; border-left:3px solid var(--accent);
+          padding:10px 14px; border-radius:0 8px 8px 0; margin-top:14px; }
+  code { background:#0b0d11; padding:1px 6px; border-radius:5px; font-size:12.5px; color:#cfe0ff; }
+  footer { color:var(--muted); font-size:12px; text-align:center; padding:24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📚 law-chatbot — 데이터 구조 &amp; 처리 흐름</h1>
+  <p>국세청 질의회신 · K-IFRS 회계기준 · 조세 판례/결정례를 근거로 답하는 법률·세무 RAG 챗봇</p>
+</header>
+
+<main>
+
+  <!-- 1. 큰 그림 -->
+  <section>
+    <h2>1️⃣ 전체 한눈에 보기</h2>
+    <p class="sub">사용자 질문 → 도구로 근거 수집 → 검증 → 답변. 굵은 화살표가 메인 흐름.</p>
+    <div class="mermaid">
+flowchart TB
+  U([👤 사용자 질문]) ==> API["⚙️ /api/chat<br/>(Next.js, Vercel)"]
+  API ==> LOOP{{"🤖 Claude 에이전트 루프<br/>최대 12스텝 · 도구 병렬 호출"}}
+
+  LOOP -- "법령·판례(실시간)" --> MCP["🌐 korean-law MCP<br/>(법제처 OPEN API)"]
+  LOOP -- "질의회신·회계·결정례(자체DB)" --> RAG["🔎 Turso RAG 검색<br/>app/lib/turso.js"]
+  RAG --> DB[("🗄️ Turso (libSQL)<br/>벡터 + 전문검색")]
+  LOOP -. "쿼리 임베딩" .-> GEM["✨ Gemini<br/>embedding-001 (768차원)"]
+
+  LOOP ==> JUDGE["🧪 답변 검증(judge)<br/>근거·인용 일치 확인"]
+  JUDGE -- "문제 있으면 재작성" --> LOOP
+  JUDGE ==> ANS([📝 최종 답변 + 출처/링크])
+  ANS ==> U
+
+  classDef ext fill:#1d2733,stroke:#3a5680,color:#cfe0ff;
+  classDef db fill:#26201d,stroke:#7a5a3a,color:#ffe6cf;
+  classDef core fill:#1b2420,stroke:#3a7a5a,color:#cfffe6;
+  class MCP,GEM ext; class DB db; class LOOP,JUDGE core;
+    </div>
+    <div class="legend">
+      <span>🌐 <b>외부 실시간</b>: 법제처 법령·판례·해석례</span>
+      <span>🗄️ <b>자체 DB</b>: 미리 임베딩해 넣어둔 8종 데이터</span>
+      <span>✨ <b>임베딩</b>: 질문을 768개 숫자(벡터)로 변환</span>
+    </div>
+  </section>
+
+  <!-- 2. 데이터 구조 -->
+  <section>
+    <h2>2️⃣ 데이터 구조 (Turso DB)</h2>
+    <p class="sub">청크(chunk)=긴 문서를 검색용으로 잘게 자른 조각. 각 조각은 ‘의미 벡터’와 ‘키워드 색인’ 두 가지로 검색됨.</p>
+    <div class="mermaid">
+flowchart LR
+  subgraph NTS["🗂️ 국세청·기재부 질의회신 (약 7.5만)"]
+    direction TB
+    N1["<b>nts_chunks</b><br/>embedding F32_BLOB(768)<br/>content (BLOB, text/gzip)<br/>title · doc_type · tlaw(세목)<br/>prod_date · qstn_no · reply_no<br/>chunk_index · chunk_total"]
+    N2["<b>nts_fts</b> (FTS5 trigram)<br/>title · keywords"]
+    N1 -- "rowid 공유" --- N2
+  end
+
+  subgraph KIFRS["📘 K-IFRS 회계기준 (약 1.7만)"]
+    direction TB
+    K1["<b>kifrs_chunks</b><br/>embedding F32_BLOB(768)<br/>content (BLOB)<br/>doc_type(standard/interp/qna)<br/>std_no · heading_path · para_range<br/>date · related_std"]
+    K2["<b>kifrs_fts</b> (FTS5 trigram)<br/>title · heading_path · related_std"]
+    K1 -- "rowid 공유" --- K2
+  end
+
+  subgraph PREC["⚖️ 조세 판례·결정례 (약 11만)"]
+    direction TB
+    P1["<b>precedent_chunks</b><br/>embedding F32_BLOB(768)<br/>content (BLOB)<br/>doc_type(심판/심사/판례…)<br/>case_no(사건번호) · tlaw · prod_date"]
+    P2["<b>precedent_fts</b> (FTS5 trigram)<br/>title · keywords · case_no"]
+    P1 -- "rowid 공유" --- P2
+  end
+
+  classDef vec fill:#1b2333,stroke:#3a5680,color:#cfe0ff;
+  classDef fts fill:#231b33,stroke:#5a3a80,color:#e6cfff;
+  class N1,K1,P1 vec; class N2,K2,P2 fts;
+    </div>
+    <div class="note">
+      각 데이터는 <b>두 벌</b>로 색인됩니다 — <code>*_chunks</code>(의미 벡터, 비슷한 뜻 검색) + <code>*_fts</code>(키워드 trigram, 글자 일치 검색).
+      둘을 같은 <code>rowid</code>로 묶어두고, 검색 때 합쳐서 정확도를 올립니다.
+    </div>
+  </section>
+
+  <!-- 3. 하이브리드 검색 -->
+  <section>
+    <h2>3️⃣ 하이브리드 검색 한 번의 내부 동작 (RRF)</h2>
+    <p class="sub">예: <code>search_nts_taxlaw("월합계 세금계산서")</code> 한 번이 도는 과정. K-IFRS·판례도 동일 패턴.</p>
+    <div class="mermaid">
+flowchart TB
+  Q([질문 텍스트]) --> EMB["✨ Gemini 임베딩<br/>→ 768차원 벡터"]
+  EMB --> DENSE["🧲 의미 검색(dense)<br/>vector_distance_cos 정렬<br/>상위 30개"]
+  Q --> SPARSE["🔤 키워드 검색(sparse)<br/>FTS5 MATCH + bm25<br/>상위 30개"]
+
+  DENSE --> RRF{{"🔀 RRF 순위 융합<br/>1/(60+의미순위) + 1/(60+키워드순위)"}}
+  SPARSE --> RRF
+  RRF --> TOP["상위 N개(≤10) 선별"]
+  TOP --> HYDRATE["📄 본문·메타 채우기<br/>content gzip 해제 + cos_sim 계산"]
+  HYDRATE --> FLOOR{"관련도 문턱<br/>cos_sim ≥ 0.25?"}
+  FLOOR -- "통과" --> OUT([📑 결과: 본문 + 문서ID/사건번호 + 관련도])
+  FLOOR -- "미달" --> DROP["버림 → '관련 자료 없음'"]
+
+  classDef step fill:#171f1b,stroke:#3a7a5a,color:#cfffe6;
+  class DENSE,SPARSE,HYDRATE step;
+    </div>
+    <div class="legend">
+      <span>🧲 <b>dense</b>: 글자가 달라도 뜻이 비슷하면 매칭</span>
+      <span>🔤 <b>sparse</b>: 문서번호·고유명사 등 정확한 글자 매칭에 강함</span>
+      <span>🔀 <b>RRF</b>: 두 결과의 순위를 섞어 둘 다 잘 잡음</span>
+    </div>
+  </section>
+
+  <!-- 4. 도구 목록 -->
+  <section>
+    <h2>4️⃣ 에이전트가 쓰는 도구들</h2>
+    <p class="sub">Claude가 질문에 맞춰 스스로 골라(병렬로) 호출. 앞쪽 4개는 법제처 실시간, 뒤쪽은 자체 DB.</p>
+    <div class="mermaid">
+flowchart LR
+  AG{{🤖 Claude 에이전트}}
+
+  AG --> T1["🌐 search_law / get_law_text<br/>법령 조문(실시간)"]
+  AG --> T2["🌐 search_decisions / get_decision_text<br/>판례·해석례 18도메인(실시간)"]
+  AG --> T3["🗂️ search_nts_taxlaw<br/>국세청·기재부 질의회신"]
+  AG --> T4["📘 search_kifrs_accounting<br/>K-IFRS 기준서·QnA"]
+  AG --> T5["⚖️ search_precedent<br/>심판·심사·판례 결정례"]
+  AG --> T6["🔍 get_nts_document / get_kifrs_passage<br/>발췌 → 전문/앞뒤 문맥 확장"]
+
+  T1 --> MCP[🌐 korean-law MCP]
+  T2 --> MCP
+  T3 --> TUR[🗄️ Turso RAG]
+  T4 --> TUR
+  T5 --> TUR
+  T6 --> TUR
+
+  classDef ext fill:#1d2733,stroke:#3a5680,color:#cfe0ff;
+  classDef db fill:#26201d,stroke:#7a5a3a,color:#ffe6cf;
+  class MCP ext; class TUR db;
+    </div>
+    <div class="note">
+      <b>세무 리서치 프로토콜</b>: 해석 쟁점은 ①법령 ②과세관청 해석(국세청+기재부) ③심판·심사결정 ④법원 판례 —
+      네 버킷을 <b>각각 독립적으로</b> 조회한 뒤 종합합니다. 한 곳에서 결과가 나와도 다른 버킷을 생략하지 않습니다.
+    </div>
+  </section>
+
+  <!-- 5. 환경/배포 -->
+  <section>
+    <h2>5️⃣ 배포 &amp; 연결 (운영 환경)</h2>
+    <p class="sub">Vercel에 올라가고, 핵심 연결고리는 환경변수. 이게 빠지면 검색이 통째로 멈춥니다.</p>
+    <div class="mermaid">
+flowchart LR
+  GH["📦 GitHub<br/>ghdwp45/law-chatbot"] -- "push 시 자동배포" --> VER["▲ Vercel<br/>(Next.js 서버리스)"]
+  VER -- "TURSO_DATABASE_URL<br/>TURSO_AUTH_TOKEN" --> TUR[("🗄️ Turso libSQL<br/>nts/kifrs/precedent")]
+  VER -- "GEMINI_API_KEY" --> GEM["✨ Gemini 임베딩"]
+  VER -- "ANTHROPIC_API_KEY" --> CLA["🤖 Claude (답변 생성)"]
+  VER -- "LAW_OC" --> MCP["🌐 korean-law MCP"]
+
+  classDef ok fill:#171f1b,stroke:#3a7a5a,color:#cfffe6;
+  class VER ok;
+    </div>
+    <div class="note">
+      과거 장애 원인: Vercel에 <code>TURSO_DATABASE_URL</code> 환경변수가 빠져 있어 자체 DB 검색이 전부 실패 → 추가 후 정상.
+      현재 행 수 확인됨: nts 75,633 · kifrs 17,364 · precedent 112,468.
+    </div>
+  </section>
+
+</main>
+
+<footer>law-chatbot architecture · Mermaid 자동 렌더 · 생성 2026-06-30</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    securityLevel: "loose",
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: "basis" }
+  });
+</script>
+</body>
+</html>
