@@ -49,6 +49,10 @@ const PASSAGE_MAX_WINDOW = 3;
 // 문서 전체 조회(get_nts_document)가 가져올 최대 청크 수(비정상적으로 큰 문서 방어).
 const DOC_MAX_CHUNKS = 30;
 const ANSWER_MODEL = process.env.ANSWER_MODEL || 'claude-sonnet-4-6';
+// 형식·태그만 다시 입히는 '빠른 재포맷' 전용 모델. 내용은 judge가 이미 통과시킨 상태라
+// 새 법리 판단·인용이 없고 순수 재포맷이므로 빠른 모델을 써도 내용 품질에 영향이 없다.
+// (내용 수정이 필요한 진짜 재작성/보충 패스는 ANSWER_MODEL을 그대로 쓴다.)
+const REFORMAT_MODEL = process.env.REFORMAT_MODEL || 'claude-haiku-4-5';
 // judge 모델 분기: 저위험은 빠른 Haiku, 고위험·치명결함은 Sonnet 유지
 const FAST_JUDGE_MODEL = process.env.FAST_JUDGE_MODEL || 'claude-haiku-4-5';
 const STRICT_JUDGE_MODEL = process.env.STRICT_JUDGE_MODEL || process.env.JUDGE_MODEL || 'claude-sonnet-4-6';
@@ -1727,7 +1731,7 @@ export async function POST(req) {
       // 한 번의 생성 패스(도구 루프). convo·stats를 공유·누적한다.
       // streamAnswer=false면 답변 토큰·폐기 신호를 화면에 보내지 않는다(재작성 중 원본 유지용).
       // useTools=false면 도구 자체를 모델에 노출하지 않는다(빠른 교정 모드: 새 조회 구조적 차단).
-      async function generate(maxSteps, streamAnswer = true, useTools = true) {
+      async function generate(maxSteps, streamAnswer = true, useTools = true, model = ANSWER_MODEL) {
         for (let step = 0; step < maxSteps; step++) {
           if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
           // 레이트리밋 누적: 재시도 루프로 deadline abort되지 않도록 현재 근거로 강제 합성
@@ -1740,7 +1744,7 @@ export async function POST(req) {
 
           const ms = anthropic.messages.stream(
             {
-              model: ANSWER_MODEL,
+              model,
               max_tokens: 16000,
               system: cachedSystem,
               ...(useTools ? { tools: activeToolDefs } : {}),
@@ -1970,6 +1974,19 @@ export async function POST(req) {
         let { answerText } = await generate(MAX_STEPS);
         mark('generate done');
 
+        // [근거 조기 표시] 1차 생성으로 이미 확보한 관련법령·출처를 '다듬는 중'(보충/재작성) 이전에 미리 보낸다.
+        // 사용자가 긴 다듬기 구간 동안 근거가 조회됐음을 바로 확인할 수 있게 하기 위함(불안감 해소).
+        // 이는 잠정 표시일 뿐이며, 최종 done 이벤트에서 재작성·보충 결과를 반영한 authoritative 값으로 다시 교체된다.
+        try {
+          const previewLinks = annotateLawLinks(parseLawLinks(answerText, stats.sources), stats.sources);
+          const previewSources = buildSourcesForClient(stats.sources);
+          if (previewLinks.length || previewSources.length) {
+            send({ preview: true, lawLinks: previewLinks, sources: previewSources });
+          }
+        } catch (e) {
+          console.error('[WARN] 근거 조기 표시 실패(무시하고 진행):', maskSecrets(e.message));
+        }
+
         // 보충 패스(coverage repair) — judge보다 먼저, 빠진 출처 버킷만 1회 병렬 조회한다.
         // 프롬프트(세무 리서치 프로토콜)는 누락 '빈도'만 줄일 뿐 보장은 못 하므로, 서버가 직접
         // 빠진 버킷을 보충해 judge가 '불완전 근거' 상태에서 먼저 평가/재작성하는 낭비를 막는다.
@@ -2101,10 +2118,20 @@ export async function POST(req) {
 
             // 재작성 토큰은 화면에 흘리지 않는다(streamAnswer=false) → 원본이 유지되다가 최종본으로 한 번에 교체.
             // 빠른 교정 모드면 도구를 아예 노출하지 않아(useTools=false) 새 조회 없이 기존 근거로만 다듬는다.
+            // 빠른 모델(Haiku) 재포맷은 '내용이 실제로 검증된' 경우에만 허용한다.
+            // judge.action==='pass'에는 시간부족·API오류·저위험으로 judge를 '건너뛴' pass도 섞여 있어,
+            // 그런 미검증 답변을 다른 모델로 다시 쓰면 법률 내용이 미묘하게 바뀔 위험이 있다.
+            // → judge가 실제로 실행되어(needsJudge) 통과했고, 그 사유에 생략/불가/실패 표시가 없을 때만 인정.
+            const judgeGenuinelyPassed = needsJudge && judge.action === 'pass'
+              && !judge.reasons?.some((r) => r.includes('judge') && /생략|불가|실패/.test(r));
+            // 형식만 문제인 재포맷(formatOnly)이고 내용이 실제 검증됐다면 빠른 모델로 형식·태그만 다시 입힌다.
+            // 미검증(judge 생략/오류) 또는 일반 재작성은 ANSWER_MODEL(Sonnet)을 그대로 써 품질을 유지한다.
+            const useReformatModel = formatOnly && judgeGenuinelyPassed;
+            const rewriteModel = useReformatModel ? REFORMAT_MODEL : ANSWER_MODEL;
             try {
-              const second = await generate(fastRewrite ? 2 : REWRITE_STEPS, false, !fastRewrite);
+              const second = await generate(fastRewrite ? 2 : REWRITE_STEPS, false, !fastRewrite, rewriteModel);
               if (second.answerText) answerText = second.answerText;
-              mark(`rewrite done (${fastRewrite ? 'fast' : 'full'})`);
+              mark(`rewrite done (${fastRewrite ? 'fast' : 'full'}${useReformatModel ? ', reformat-model' : ''})`);
             } catch (e) {
               // 재작성 호출이 인프라/한도/시간 오류로 실패해도 재작성 전 답변(answerText)을 보존.
               // (재작성 중 스트리밍을 끈 상태라 화면엔 원본이 그대로 남아 있어 깜빡임 없음)

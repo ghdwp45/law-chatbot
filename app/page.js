@@ -352,6 +352,13 @@ export default function Home() {
           streamBuf = "";
           renderLast("");
         }
+        // [근거 조기 표시] 1차 생성 직후 서버가 보낸 잠정 관련법령·출처를 미리 화면에 띄운다.
+        // 긴 '다듬는 중' 구간 전에 근거가 조회됐음을 사용자가 바로 확인할 수 있게 한다.
+        // (최종 done 이벤트에서 authoritative 값으로 다시 교체됨)
+        if (parsed.preview) {
+          if (Array.isArray(parsed.lawLinks)) setLawLinks(parsed.lawLinks);
+          if (Array.isArray(parsed.sources)) setSources(parsed.sources);
+        }
         // 재작성(다듬기) 시작: 원본 답변은 화면에 유지하고 "검증·보완 중"만 표시한다.
         // (백엔드가 재작성 중에는 answerDelta/discardDraft를 보내지 않으므로 화면이 안 비워짐)
         if (parsed.revising) setRevising(true);
