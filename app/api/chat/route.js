@@ -768,6 +768,9 @@ ${earlyStop}
 4. 핵심 결론은 법령·예규 기준으로 작성하고, 심판례로 결론을 뒤집지 말 것.
 
 [작성 형식]
+- [근거 조회 필수 · 예외 없음] 개념 설명·용어 정의 질문이라도 기억(내장 지식)만으로 답하지 말 것.
+  답변 작성 전에 반드시 search_law로 관련 법령을 찾고 get_law_text로 조문 원문을 확인한 뒤, 그 근거로 작성한다.
+  (예: "감사인 독립성" 같은 개념도 외부감사법·공인회계사법 조문을 조회해 근거를 붙인다.)
 - 도구 호출 전에 중간 계획·진행상황을 출력하지 말 것. 최종 답변만 아래 형식으로 출력한다.
 - [형식 필수 · 예외 없음] 개념 설명·용어 정의·간단한 질문이라도 반드시 아래 [답변 형식]의
   ===해설=== … ===해설끝=== 과 ===관련법령=== … ===관련법령끝=== 마커로 감싸고, 본문에는 [출처 태그]를 붙여
@@ -1731,7 +1734,10 @@ export async function POST(req) {
       // 한 번의 생성 패스(도구 루프). convo·stats를 공유·누적한다.
       // streamAnswer=false면 답변 토큰·폐기 신호를 화면에 보내지 않는다(재작성 중 원본 유지용).
       // useTools=false면 도구 자체를 모델에 노출하지 않는다(빠른 교정 모드: 새 조회 구조적 차단).
-      async function generate(maxSteps, streamAnswer = true, useTools = true, model = ANSWER_MODEL) {
+      // forceFirstTool: 첫 스텝(step 0)에서 도구 호출을 강제(tool_choice:any)한다. 첫 생성에서만 켜서
+      // 모델이 개념·정의 질문을 근거 조회 없이 기억으로 답하는 것을 막는다(그래야 '법령 미조회' fatal로
+      // 인한 이중 생성=풀 재작성을 피함). 재작성·보충 패스에는 켜지 않는다.
+      async function generate(maxSteps, streamAnswer = true, useTools = true, model = ANSWER_MODEL, forceFirstTool = false) {
         for (let step = 0; step < maxSteps; step++) {
           if (Date.now() > deadline) throw new Error('TOTAL_TIMEOUT');
           // 레이트리밋 누적: 재시도 루프로 deadline abort되지 않도록 현재 근거로 강제 합성
@@ -1748,6 +1754,8 @@ export async function POST(req) {
               max_tokens: 16000,
               system: cachedSystem,
               ...(useTools ? { tools: activeToolDefs } : {}),
+              // 첫 생성의 step 0만 도구 사용 강제 → 개념질문도 우선 근거를 조회하게 함(이중 생성 방지).
+              ...(useTools && forceFirstTool && step === 0 ? { tool_choice: { type: 'any' } } : {}),
               messages: cloneWithLastMessageCache(convo),
             },
             { signal }
@@ -1971,7 +1979,8 @@ export async function POST(req) {
           try { controller.enqueue(enc.encode(': ping\n\n')); } catch {}
         }, 10000);
         send({ status: 'drafting' });
-        let { answerText } = await generate(MAX_STEPS);
+        // 첫 생성은 step 0에서 도구 사용을 강제(forceFirstTool=true) → 개념·정의 질문도 근거를 먼저 조회.
+        let { answerText } = await generate(MAX_STEPS, true, true, ANSWER_MODEL, true);
         mark('generate done');
 
         // [근거 조기 표시] 1차 생성으로 이미 확보한 관련법령·출처를 '다듬는 중'(보충/재작성) 이전에 미리 보낸다.
