@@ -414,6 +414,12 @@ export default function Home() {
         updated[updated.length - 1] = { role: "assistant", content: errMsg };
         return updated;
       });
+      // 응답이 에러로 실패했으면, '근거 조기 표시(preview)'로 미리 띄운 관련법령·출처를 비운다.
+      // (실패한 답변 옆에 잠정 근거가 남아 '제대로 나온 것'처럼 오해되는 것 방지 — 최종 done이 안 왔으므로 갱신도 안 됨)
+      setLawLinks([]);
+      setSources([]);
+      setCoverage(null);
+      setSheetOpen(false);
     } finally {
       // 이 요청이 여전히 활성 요청일 때만 정리한다.
       // (중단 직후 새 요청이 시작되면, 옛 요청의 정리가 새 요청의 컨트롤러·상태를 덮어쓰지 않도록.)
