@@ -2065,6 +2065,8 @@ export async function POST(req) {
         const judge = needsJudge
           ? await runJudge(lastUserMsg, answerText, pickJudgeModel(stats, det))
           : { action: 'pass', reasons: ['저위험·근거충분으로 judge 생략'], requireDecisionLookup: false, instructions: '' };
+        // judge 모델의 원래 requireDecisionLookup 결정(이후 fast 처리에서 false로 덮어써지기 전)을 진단용으로 보존.
+        const judgeReqLookupRaw = !!judge.requireDecisionLookup;
         mark('judge done');
 
         const needRewrite =
@@ -2098,12 +2100,14 @@ export async function POST(req) {
             // 형식·출처태그 마커 누락만이 재작성 사유이고 내용은 judge를 통과했다면(내용 문제 없음),
             // 새 조회는 불필요하다. 이미 확보한 근거로 형식·태그만 빠르게 다시 입혀 풀 재작성(수십 초)을 피한다.
             // (판정 fatal은 '법령 조회 미수행'과 '형식 누락' 둘뿐이라, every로 형식누락 단독일 때만 참이 된다.)
-            // judge가 통과했더라도 추가 조회(requireDecisionLookup)를 요구했다면 fast로 몰지 않는다.
-            // (fast는 아래 2079행에서 requireDecisionLookup=false로 덮어써 그 조회를 건너뛰기 때문.)
+            // judge가 통과했더라도 추가 조회(requireDecisionLookup)를 요구했다면, 고위험 질문에서는
+            // fast로 몰지 않는다(fast는 아래에서 requireDecisionLookup=false로 덮어써 그 조회를 건너뛰므로).
+            // 단, 비고위험(개념 설명 등) 질문에서는 judge가 개념질문에도 이 플래그를 잘못 켜는 경우가 잦고,
+            // 이미 judge를 통과한(내용 정상) 답이라 추가 조회가 실질적으로 불필요하므로 fast 재포맷을 허용한다.
             const formatOnly = det.fatal.length > 0
               && det.fatal.every((f) => f === '지정 답변 형식 누락')
               && judge.action === 'pass' && softReasons.length === 0
-              && !judge.requireDecisionLookup;
+              && (!judge.requireDecisionLookup || !isHighRiskLegalQuestion(stats.question));
             const fastRewrite = formatOnly || searchExhausted || remaining < REWRITE_FULL_REMAINING_MS;
             if (fastRewrite) judge.requireDecisionLookup = false;
             const reviseMsg =
@@ -2193,7 +2197,7 @@ export async function POST(req) {
           law: stats.lawTextSucceeded, dec: stats.decisionTextSucceeded,
           ntsRag: stats.ntsRagSucceeded, kifrs: stats.kifrsRagSucceeded,
           decSearch: stats.decisionSearchAttempted, domains: [...stats.domainsSearched],
-          judgeRan: needsJudge, judge: judge.action, rewrote: needRewrite, fatal, truncated: truncatedOut,
+          judgeRan: needsJudge, judge: judge.action, reqLookup: judgeReqLookupRaw, highRisk: isHighRiskLegalQuestion(stats.question), rewrote: needRewrite, fatal, truncated: truncatedOut,
           // 진단: 재작성이 왜 트리거됐는지 운영 로그에서도 보이도록 사유를 남긴다.
           judgeReasons: judge.reasons, soft: softReasons, rewriteFailed, rewriteSkippedForTime,
           totalMs: Date.now() - startedAt,
