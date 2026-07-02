@@ -2075,7 +2075,16 @@ export async function POST(req) {
             // ③ 빠른 교정 모드 판정: 검색을 이미 소진했거나 남은 시간이 빠듯하면
             //    새 도구 호출 없이(2스텝) 기존 근거로만 다듬어 시간 안에 끝낸다.
             const searchExhausted = stats.decisionSearchAttempted >= MAX_DECISION_SEARCHES;
-            const fastRewrite = searchExhausted || remaining < REWRITE_FULL_REMAINING_MS;
+            // 형식·출처태그 마커 누락만이 재작성 사유이고 내용은 judge를 통과했다면(내용 문제 없음),
+            // 새 조회는 불필요하다. 이미 확보한 근거로 형식·태그만 빠르게 다시 입혀 풀 재작성(수십 초)을 피한다.
+            // (판정 fatal은 '법령 조회 미수행'과 '형식 누락' 둘뿐이라, every로 형식누락 단독일 때만 참이 된다.)
+            // judge가 통과했더라도 추가 조회(requireDecisionLookup)를 요구했다면 fast로 몰지 않는다.
+            // (fast는 아래 2079행에서 requireDecisionLookup=false로 덮어써 그 조회를 건너뛰기 때문.)
+            const formatOnly = det.fatal.length > 0
+              && det.fatal.every((f) => f === '지정 답변 형식 누락')
+              && judge.action === 'pass' && softReasons.length === 0
+              && !judge.requireDecisionLookup;
+            const fastRewrite = formatOnly || searchExhausted || remaining < REWRITE_FULL_REMAINING_MS;
             if (fastRewrite) judge.requireDecisionLookup = false;
             const reviseMsg =
               `직전 답변에 다음 문제가 있어 재작성이 필요합니다:\n- ${reasons.join('\n- ')}\n\n` +
