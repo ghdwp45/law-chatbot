@@ -1489,7 +1489,14 @@ export async function POST(req) {
   const enc = new TextEncoder();
   const deadline = Date.now() + TOTAL_TIMEOUT_MS;
   const startedAt = Date.now();
-  const mark = (label) => { if (!IS_PROD) console.log(`[TIME] ${label}: ${Date.now() - startedAt}ms`); };
+  // 단계별 타이밍. 개발 환경에선 즉시 [TIME] 로그로 찍고, 운영 포함 항상 timeline 배열에 누적해
+  // 요청 종료 시 [INFO] 요약에 함께 남긴다(운영에서 '느림' 원인·단계별 소요를 볼 수 있게).
+  const timeline = [];
+  const mark = (label) => {
+    const ms = Date.now() - startedAt;
+    timeline.push(`${label}@${ms}`);
+    if (!IS_PROD) console.log(`[TIME] ${label}: ${ms}ms`);
+  };
 
   // 타임아웃 신호 + 클라이언트 중단 신호를 하나로 결합.
   // 사용자가 '정지'를 누르거나 연결을 끊으면 req.signal이 abort되어,
@@ -2128,6 +2135,12 @@ export async function POST(req) {
         }
 
         console.log('[INFO] 요약:', JSON.stringify({
+          // 진단: MCP 연결 여부 — '근거 0건'이 MCP 실패인지, 붙었는데 결과가 없던 건지 구분용.
+          // 질문 원문은 민감정보(회사·계약 등)를 포함할 수 있어 운영 로그엔 남기지 않고 길이만 남긴다.
+          // (원문 대조가 필요한 개발 환경에서만 앞 60자를 남긴다.)
+          qLen: (stats.question || '').length,
+          ...(IS_PROD ? {} : { q: (stats.question || '').slice(0, 60) }),
+          mcp: mcpConnected,
           calls: stats.calls.map((c) => `${c.name}:${c.cls === 'ok' ? 'O' : c.cls === 'empty' ? '-' : 'X'}`),
           toolDiag: {
             ok: stats.calls.filter((c) => c.cls === 'ok').length,
@@ -2136,12 +2149,16 @@ export async function POST(req) {
           },
           timeouts: stats.errors.filter((e) => e.timeout).length,
           errSample: stats.errors.slice(0, 8),
+          // 근거 확보 플래그: 법령원문·판례전문·국세청/기재부 RAG·K-IFRS RAG 중 무엇이 성공했는지.
+          // 넷 다 false면 '근거 없이 일반 답변'이 나간 것(감사인 독립성 같은 비세법 주제에서 발생 가능).
           law: stats.lawTextSucceeded, dec: stats.decisionTextSucceeded,
+          ntsRag: stats.ntsRagSucceeded, kifrs: stats.kifrsRagSucceeded,
           decSearch: stats.decisionSearchAttempted, domains: [...stats.domainsSearched],
           judgeRan: needsJudge, judge: judge.action, rewrote: needRewrite, fatal, truncated: truncatedOut,
           // 진단: 재작성이 왜 트리거됐는지 운영 로그에서도 보이도록 사유를 남긴다.
           judgeReasons: judge.reasons, soft: softReasons, rewriteFailed, rewriteSkippedForTime,
           totalMs: Date.now() - startedAt,
+          timeline,   // 단계별 소요(ms): mcp connected / tools listed / generate done / judge done / rewrite done 등
         }));
 
         if (truncatedOut) send({ truncated: true });
