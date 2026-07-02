@@ -1,0 +1,7 @@
+{
+  "name": "turso-migrate",
+  "type": "module",
+  "dependencies": {
+    "@libsql/client": "^0.17.4"
+  }
+}

@@ -29,3 +29,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 데이터 파이프라인: 대용량 백업 및 생성물
+pipeline/backup/
+pipeline/**/__pycache__/
+pipeline/**/node_modules/
+pipeline/**/state*.json
+# 국세청 원본 스크래핑 corpus(217MB, collect.py로 재수집 가능) — git 제외
+pipeline/nts_scraper/data/
